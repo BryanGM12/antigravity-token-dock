@@ -598,6 +598,8 @@ class MinimalistPillHandle(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def set_expanded(self, expanded: bool):
@@ -666,6 +668,8 @@ class AntigravityDockedOverlay(QWidget):
         self.win_event_hook = None
         self._hook_cb_ref = None
         self.sync_spin_step = 0
+        self.last_toggle_time = 0.0
+        self.is_dialog_active = False
 
         self.init_window_flags()
         self.init_ui()
@@ -731,11 +735,17 @@ class AntigravityDockedOverlay(QWidget):
 
         icon_star = QLabel("✦")
         icon_star.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        icon_star.setStyleSheet("color: #528bff;")
+        icon_star.setStyleSheet("color: #528bff; cursor: pointer;")
+        icon_star.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        icon_star.setToolTip("Clic para ocultar panel")
+        icon_star.mousePressEvent = lambda e: self.toggle_expanded()
 
         title_lbl = QLabel("Antigravity Tokens")
         title_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        title_lbl.setStyleSheet("color: #f1f5f9;")
+        title_lbl.setStyleSheet("color: #f1f5f9; cursor: pointer;")
+        title_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        title_lbl.setToolTip("Clic para ocultar panel")
+        title_lbl.mousePressEvent = lambda e: self.toggle_expanded()
 
         self.btn_add = QPushButton("+")
         self.btn_add.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -852,9 +862,9 @@ class AntigravityDockedOverlay(QWidget):
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         panel_layout.addWidget(footer)
 
-        # Add to main layout
-        self.main_layout.addWidget(self.pill_handle)
-        self.main_layout.addWidget(self.panel_container)
+        # Add to main layout (pin pill_handle to top so it never drifts vertically)
+        self.main_layout.addWidget(self.pill_handle, 0, Qt.AlignmentFlag.AlignTop)
+        self.main_layout.addWidget(self.panel_container, 1)
         self.panel_container.setVisible(False)
 
         self.set_collapsed_geometry()
@@ -891,12 +901,24 @@ class AntigravityDockedOverlay(QWidget):
         self.sync_spin_step = (self.sync_spin_step + 1) % len(spinner_chars)
         self.btn_refresh.setText(spinner_chars[self.sync_spin_step])
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.is_expanded:
+                self.toggle_expanded()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if not self.is_expanded:
                 self.toggle_expanded()
-            elif event.pos().x() <= 28 and event.pos().y() <= 110:
+                event.accept()
+                return
+            elif event.pos().x() <= 28:
                 self.toggle_expanded()
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def init_tracking_engine(self):
@@ -950,6 +972,7 @@ class AntigravityDockedOverlay(QWidget):
         self.setFixedSize(28, 110)
 
     def toggle_expanded(self):
+        self.last_toggle_time = time.time()
         self.is_expanded = not self.is_expanded
         self.pill_handle.set_expanded(self.is_expanded)
 
@@ -995,6 +1018,18 @@ class AntigravityDockedOverlay(QWidget):
 
         if not self.isVisible():
             self.show()
+
+        # Auto-collapse if user clicks outside the dock while expanded
+        if self.is_expanded and not animating and not self.is_dialog_active:
+            if time.time() - self.last_toggle_time > 0.35:
+                if (user32.GetAsyncKeyState(0x01) & 0x8000) != 0:
+                    if self.last_rect:
+                        lx, ly, lw, lh = self.last_rect
+                        pt = wintypes.POINT()
+                        user32.GetCursorPos(ctypes.byref(pt))
+                        if not (lx <= pt.x <= lx + lw and ly <= pt.y <= ly + lh):
+                            self.toggle_expanded()
+                            return
 
         ag_rect = wintypes.RECT()
         hr = dwmapi.DwmGetWindowAttribute(self.antigravity_hwnd, 9, ctypes.byref(ag_rect), ctypes.sizeof(ag_rect))
@@ -1171,9 +1206,14 @@ class AntigravityDockedOverlay(QWidget):
         self.refresh_memory_data()
 
     def on_add_account_dialog(self):
-        dlg = AddAccountDialog(self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.reload_accounts_ui()
+        self.is_dialog_active = True
+        try:
+            dlg = AddAccountDialog(self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self.reload_accounts_ui()
+        finally:
+            self.is_dialog_active = False
+            self.last_toggle_time = time.time()
 
     def reload_accounts_ui(self):
         # Clear existing cards
