@@ -23,10 +23,13 @@ Features:
 """
 
 import os
+import io
 import sys
 import json
 import time
 import math
+import wave
+import struct
 import ctypes
 import subprocess
 from ctypes import wintypes
@@ -77,38 +80,94 @@ from token_memory import (
 from notification_service import notify_auto_switch_toggled, send_windows_toast
 
 class AudioChimeEngine:
-    """Discreet, elegant synthesized sound feedback using native Windows sound aliases."""
-    @staticmethod
-    def play_switch_success():
-        if is_sound_enabled():
+    """High-fidelity procedural audio synthesizer delivering elegant, crystal-clear acoustic feedback."""
+    _cached = {}
+
+    @classmethod
+    def _synth(cls, tones, duration_ms=100, volume=0.35, sample_rate=44100):
+        n = int(sample_rate * duration_ms / 1000.0)
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            frames = bytearray()
+            for i in range(n):
+                t = i / sample_rate
+                rel = i / n
+                if rel < 0.08:
+                    env = rel / 0.08
+                else:
+                    env = math.exp(-3.8 * (rel - 0.08))
+                val = 0.0
+                for item in tones:
+                    if isinstance(item, (int, float)):
+                        val += math.sin(2.0 * math.pi * item * t)
+                    elif isinstance(item, (tuple, list)):
+                        f, s_r, e_r = item
+                        if s_r <= rel <= e_r:
+                            sub_rel = (rel - s_r) / max(0.01, (e_r - s_r))
+                            sub_env = math.sin(math.pi * sub_rel)
+                            val += math.sin(2.0 * math.pi * f * t) * sub_env
+                sample = int(max(-32768, min(32767, val * env * volume * 32767.0)))
+                frames.extend(struct.pack('<h', sample))
+            wf.writeframes(frames)
+        return buf.getvalue()
+
+    @classmethod
+    def init_cache(cls):
+        if cls._cached:
+            return
+        try:
+            cls._cached['open'] = cls._synth([(659.25, 0.0, 0.7), (880.0, 0.25, 1.0)], duration_ms=110, volume=0.32)
+            cls._cached['close'] = cls._synth([(880.0, 0.0, 0.6), (659.25, 0.25, 1.0)], duration_ms=90, volume=0.28)
+            cls._cached['tap'] = cls._synth([1600.0], duration_ms=25, volume=0.22)
+            cls._cached['toggle'] = cls._synth([(900.0, 0.0, 0.5), (1200.0, 0.3, 1.0)], duration_ms=50, volume=0.25)
+            cls._cached['refresh'] = cls._synth([(1046.5, 0.0, 0.5), (1318.5, 0.2, 1.0)], duration_ms=100, volume=0.30)
+            cls._cached['success'] = cls._synth([(1046.5, 0.0, 0.5), (1318.5, 0.25, 0.75), (1567.98, 0.5, 1.0)], duration_ms=200, volume=0.35)
+            cls._cached['alert'] = cls._synth([(392.0, 0.0, 0.5), (311.13, 0.3, 1.0)], duration_ms=130, volume=0.32)
+        except Exception:
+            pass
+
+    @classmethod
+    def play(cls, key: str):
+        if not is_sound_enabled():
+            return
+        cls.init_cache()
+        data = cls._cached.get(key)
+        if data:
             try:
-                winsound.PlaySound('SystemAsterisk', winsound.SND_ALIAS | winsound.SND_ASYNC)
+                winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_ASYNC)
             except Exception:
                 pass
 
-    @staticmethod
-    def play_refresh():
-        if is_sound_enabled():
-            try:
-                winsound.PlaySound('DeviceConnect', winsound.SND_ALIAS | winsound.SND_ASYNC)
-            except Exception:
-                pass
+    @classmethod
+    def play_open(cls):
+        cls.play('open')
 
-    @staticmethod
-    def play_toggle():
-        if is_sound_enabled():
-            try:
-                winsound.PlaySound('SystemDefault', winsound.SND_ALIAS | winsound.SND_ASYNC)
-            except Exception:
-                pass
+    @classmethod
+    def play_close(cls):
+        cls.play('close')
 
-    @staticmethod
-    def play_alert():
-        if is_sound_enabled():
-            try:
-                winsound.PlaySound('SystemExclamation', winsound.SND_ALIAS | winsound.SND_ASYNC)
-            except Exception:
-                pass
+    @classmethod
+    def play_tap(cls):
+        cls.play('tap')
+
+    @classmethod
+    def play_toggle(cls):
+        cls.play('toggle')
+
+    @classmethod
+    def play_refresh(cls):
+        cls.play('refresh')
+
+    @classmethod
+    def play_switch_success(cls):
+        cls.play('success')
+
+    @classmethod
+    def play_alert(cls):
+        cls.play('alert')
 
 class GlobalHotkeyThread(QThread):
     """Listens for global Windows hotkey Ctrl+Alt+T across all running applications."""
@@ -1065,6 +1124,7 @@ class AntigravityDockedOverlay(QWidget):
 
     def show_dock_context_menu(self, pos: QPoint):
         """Displays right-click context menu with options to close menu, rotate, auto-switch, etc."""
+        AudioChimeEngine.play_tap()
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -1651,6 +1711,7 @@ class AntigravityDockedOverlay(QWidget):
 
         self.slide_anim.stop()
         if self.is_expanded:
+            AudioChimeEngine.play_open()
             self.prepare_expanded_window_geometry()
             self.panel_container.setVisible(True)
             self.slide_anim.setDuration(240)
@@ -1659,6 +1720,7 @@ class AntigravityDockedOverlay(QWidget):
             self.slide_anim.setEndValue(self.PANEL_TARGET_WIDTH)
             self.slide_anim.start()
         else:
+            AudioChimeEngine.play_close()
             self.slide_anim.setDuration(190)
             self.slide_anim.setEasingCurve(QEasingCurve.Type.InQuad)
             self.slide_anim.setStartValue(self.current_panel_w)
@@ -2009,7 +2071,6 @@ class AntigravityDockedOverlay(QWidget):
         self.hotkey_thread.start()
 
     def on_hotkey_triggered(self):
-        AudioChimeEngine.play_toggle()
         self.toggle_expanded()
 
     def on_tray_activated(self, reason):
@@ -2086,7 +2147,7 @@ class AntigravityDockedOverlay(QWidget):
         if hasattr(self, "tray_act_sound"):
             self.tray_act_sound.setChecked(new_state)
         if new_state:
-            AudioChimeEngine.play_refresh()
+            AudioChimeEngine.play_open()
 
     def update_sound_button_ui(self):
         enabled = is_sound_enabled()
@@ -2158,6 +2219,7 @@ class AntigravityDockedOverlay(QWidget):
         QApplication.quit()
 
     def on_manual_refresh(self):
+        AudioChimeEngine.play_refresh()
         self.btn_refresh.setEnabled(False)
         self.sync_timer.start()
         self.status_line.setText("● Sincronizando vía CDP...")
@@ -2172,11 +2234,13 @@ class AntigravityDockedOverlay(QWidget):
         self.btn_refresh.setText("↻")
         self.btn_refresh.setEnabled(True)
         self.status_line.setText(f"● {msg}")
+        AudioChimeEngine.play_tap()
         self.refresh_memory_data()
 
     def on_switch_account_requested(self, target_email: str):
         if self.switching:
             return
+        AudioChimeEngine.play_tap()
         self.switching = True
         self.status_line.setText(f"● Cambiando a {target_email}...")
         self.status_line.setStyleSheet("color: #528bff;")
@@ -2200,6 +2264,7 @@ class AntigravityDockedOverlay(QWidget):
         self.refresh_memory_data()
 
     def on_add_account_dialog(self):
+        AudioChimeEngine.play_tap()
         self.is_dialog_active = True
         try:
             dlg = AddAccountDialog(self)
