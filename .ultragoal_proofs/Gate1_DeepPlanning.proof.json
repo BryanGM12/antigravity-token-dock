@@ -1,0 +1,22 @@
+﻿{
+    "gate_name":  "Gate1_DeepPlanning",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:09:59.8242200-06:00",
+    "prev_proof_hash":  "GENESIS",
+    "manifest_hash":  "b12b0403dc6c2ec4549abbfbf7f59e8544bdb7ae4411debe1a0735b9d93a11cb",
+    "proof_hash":  "df9460e820cbaa4138622988b75af4b92bf38293f6205696862584c0c7a4f838",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\SPECIFICATION.json",
+                               "sha256":  "df93136ea2d89291c4564941b2be7419d7539d802f864f9a9908f3f7f0b984b5"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\MASTER_PLAN_BLUEPRINT.md",
+                               "sha256":  "58c0d9abd0345466030b5fdcbd64d0cea6ab253ad9de82913620377384bfbd95"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\GEMINI_3D_MODEL_PIPELINE.json",
+                               "sha256":  "9971ab49d8b892f9882ad423a37e77627ad068ef2679bdb796ec13e548294138"
+                           }
+                       ]
+}

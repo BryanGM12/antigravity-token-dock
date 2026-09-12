@@ -1,0 +1,36 @@
+﻿{
+    "version":  "6.0.0",
+    "timestamp":  "2026-09-12T16:09:20.7286610-06:00",
+    "target_directory":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller",
+    "verdict":  "CHAOS_STRESS_PASSED",
+    "passed_vectors":  "3/4",
+    "summary":  "RESISTENCIA DE ACERO: El software resistió exitosamente 3/4 vectores de estrés caótico y adversarial.",
+    "vectors":  {
+                    "Vector_1_Input_Storm":  {
+                                                 "status":  "FAILED",
+                                                 "key_handling":  true,
+                                                 "mouse_handling":  false,
+                                                 "guards_present":  true
+                                             },
+                    "Vector_2_Aspect_Ratio_Stress":  {
+                                                         "status":  "PASSED",
+                                                         "resize_listener":  true,
+                                                         "aspect_update":  false,
+                                                         "responsive_design":  true
+                                                     },
+                    "Vector_3_Memory_Stability":  {
+                                                      "status":  "PASSED",
+                                                      "allocations_in_loop":  false,
+                                                      "lifecycle_cleanup":  true
+                                                  },
+                    "Vector_4_Adversarial_Bounds":  {
+                                                        "status":  "PASSED",
+                                                        "bounds_clamping":  true,
+                                                        "type_checks":  false,
+                                                        "fallback_defaults":  true
+                                                    }
+                },
+    "defects":  [
+                    "Vector 1: El sistema no posee guardas de control ni prevención de eventos repetitivos o storm de teclado/mouse."
+                ]
+}

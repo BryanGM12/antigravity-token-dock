@@ -1,0 +1,14 @@
+﻿{
+    "gate_name":  "Gate4_DynamicVerification",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:16.7914099-06:00",
+    "prev_proof_hash":  "4b04b1d6d6747d7dabbb7777ca1ae741d6193a4500884520ed96c5495ee78708",
+    "manifest_hash":  "87252ec9c2cb36cf885ef6a5c5e91c9e16cf7fa735e517e94237a71401e9cd85",
+    "proof_hash":  "b169bfef90fc3eb2a8eeda8d436bffb2e0ae61ffd73048914e6287466052bbce",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\test_harness.py",
+                               "sha256":  "97eed5b2156817d08b9e8a4519b784d50a688b536c0ccf8d926e851f8a5944d2"
+                           }
+                       ]
+}

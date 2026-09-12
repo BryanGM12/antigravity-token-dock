@@ -1,0 +1,56 @@
+﻿{
+    "verdict":  "ZERO_BLOAT_CERTIFIED",
+    "target_directory":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller",
+    "timestamp":  "2026-09-12T16:09:35.4821098-06:00",
+    "total_files_pruned":  1,
+    "bytes_reclaimed":  96084,
+    "kb_reclaimed":  93.83,
+    "mb_reclaimed":  0.09,
+    "debug_lines_cleaned":  0,
+    "smoke_test_status":  "PASSED",
+    "smoke_test_exit_code":  0,
+    "warnings":  [
+
+                 ],
+    "pruned_files_breakdown":  [
+                                   {
+                                       "path":  "docs/assets/dock_hero_banner.png",
+                                       "category":  "Orphaned_Asset",
+                                       "size":  96084,
+                                       "reason":  "Recurso multimedia huerfano no referenciado ni cargado en el codigo fuente."
+                                   }
+                               ],
+    "pristine_tree_file_count":  69,
+    "pristine_tree_preview":  [
+                                  ".gitignore (0.6 KB)",
+                                  "accounts_config.example.json (0.8 KB)",
+                                  "accounts_config.json (0.7 KB)",
+                                  "account_rotator.py (12.3 KB)",
+                                  "analytics_engine.py (7.1 KB)",
+                                  "antigravity-monitor.ps1 (12.6 KB)",
+                                  "antigravity-supervisor.ps1 (2.3 KB)",
+                                  "antigravity-switch.ps1 (0.5 KB)",
+                                  "antigravity_auto_activator.py (12.6 KB)",
+                                  "antigravity_bridge.py (8.4 KB)",
+                                  "antigravity_docked_overlay.py (94.2 KB)",
+                                  "CHAOS_TEST_REPORT.json (2.2 KB)",
+                                  "CHAOS_TEST_REPORT.md (1 KB)",
+                                  "config_manager.py (12.4 KB)",
+                                  "daemon_service.py (22.5 KB)",
+                                  "external_oauth_handler.py (16.6 KB)",
+                                  "FEATURE_DEPTH_REPORT.json (2.2 KB)",
+                                  "FEATURE_DEPTH_REPORT.md (1.4 KB)",
+                                  "GEMINI_3D_MODEL_PIPELINE.json (6.3 KB)",
+                                  "goal_resumer.py (5.2 KB)",
+                                  "install_antigravity_startup.ps1 (4.5 KB)",
+                                  "LICENSE (1 KB)",
+                                  "local_hud.py (20.5 KB)",
+                                  "MASTER_PLAN_BLUEPRINT.md (61.3 KB)",
+                                  "notification_service.py (5 KB)",
+                                  "quota_detector.py (15.3 KB)",
+                                  "README.md (12.4 KB)",
+                                  "requirements.txt (0.1 KB)",
+                                  "SPECIFICATION.json (217 KB)",
+                                  "task_resumer.py (5.6 KB)"
+                              ]
+}

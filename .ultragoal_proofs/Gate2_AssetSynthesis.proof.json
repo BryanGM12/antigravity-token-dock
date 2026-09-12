@@ -1,0 +1,38 @@
+﻿{
+    "gate_name":  "Gate2_AssetSynthesis",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:05.2605753-06:00",
+    "prev_proof_hash":  "df9460e820cbaa4138622988b75af4b92bf38293f6205696862584c0c7a4f838",
+    "manifest_hash":  "e9b2fc9d8632b984c86fb11a41d9b37ecf4208f5c53198e7b760336eca62c6c5",
+    "proof_hash":  "d04ee4b9b9c87410b863494465080274c6d807417752606b8345d4fd2d09d91e",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\models\\abandoned_sedan.glb",
+                               "sha256":  "5a3cc376d837ffb2678e3dba161c414075010f2673cf26eda5f3a7bb7006a1b1"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\models\\clicker_the_last_of_us.glb",
+                               "sha256":  "caf9d4666e7e4c49c4705cc53cde199540b8465a3a996cfd91980650f69700f9"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\models\\military_crate.glb",
+                               "sha256":  "760e0e2ad8b1fc1b94c5d7b6703a489babeb48f825cd01ddd38a5aa8fa7f7060"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\models\\player_joel.glb",
+                               "sha256":  "3d44acbe547be49a34487f2777d772cbaae74aa1b9fc7e1aa0af736959bcec6b"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\models\\tactical_weapon.glb",
+                               "sha256":  "1132e22bda7a77443c6755011f7d948ddcf3d8e0dc8cc1bbfa86ab5d246891ea"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\textures\\TEXTURE_PIPELINE_REPORT.json",
+                               "sha256":  "911291d7dd6be6d445d018025651d172ac0db2677b2c82c654b3e3cc53cf2997"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\antigravity_docked_overlay.py",
+                               "sha256":  "dab6c98820321ea12e6ce3d7b66bd586f7f922e136b991f7c7397fb247669d95"
+                           }
+                       ]
+}

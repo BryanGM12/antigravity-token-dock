@@ -1,0 +1,74 @@
+﻿{
+    "gate_name":  "Gate3_ProductionImplementation",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:11.0436158-06:00",
+    "prev_proof_hash":  "d04ee4b9b9c87410b863494465080274c6d807417752606b8345d4fd2d09d91e",
+    "manifest_hash":  "7519d8b9c36411c21c8afb594f47a6d48a7b0e7d5e1aa39a2acd96a2a1915589",
+    "proof_hash":  "4b04b1d6d6747d7dabbb7777ca1ae741d6193a4500884520ed96c5495ee78708",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\account_rotator.py",
+                               "sha256":  "01af9edf2641396786ddef81af23eb1276389c7ae6d7055f529b6668dfa27b19"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\analytics_engine.py",
+                               "sha256":  "fec351c01d590aa9663432abae288e7997fd25d39f5633e7accddd95c59ef808"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\antigravity_auto_activator.py",
+                               "sha256":  "8f06b6ebbafd67805bba332ca6726b23f57e6dcc15e657aebfe91f08bb340312"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\antigravity_bridge.py",
+                               "sha256":  "cd19d1ec5e5075fcddcfa415dbdc1d0312dca36e88b73e94c0b4413e9446ff25"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\antigravity_docked_overlay.py",
+                               "sha256":  "dab6c98820321ea12e6ce3d7b66bd586f7f922e136b991f7c7397fb247669d95"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\config_manager.py",
+                               "sha256":  "9874d90552275f5446e05c16d2833658d2adda26906ac106c5c977f8a7ba61f2"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\daemon_service.py",
+                               "sha256":  "fb44ae8905e2eb2a9b8ab46d220900780964ac419fce7eec0a8c6242632137a5"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\external_oauth_handler.py",
+                               "sha256":  "71db1c530c36e3c91e9cf15bc866ed98e8588c965fde61cec2c90a66e0fb2639"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\goal_resumer.py",
+                               "sha256":  "3c6d6c638c2897cdf19e080860ddf0564ea58e220c7478189c472e17c6e2aa90"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\local_hud.py",
+                               "sha256":  "8febbe0fcf3ac5425a171930667a50ffa87f3163ad082627d0ce43fe49b27299"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\notification_service.py",
+                               "sha256":  "bd8675c2bfc6bae70dc0a23a0a5f504faf65ea946226383e2740c91049ff7199"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\quota_detector.py",
+                               "sha256":  "56c2f698844080ba126c5cb7e92ae37e37bb933a1c84f4237843de0d2988ac57"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\task_resumer.py",
+                               "sha256":  "eeb39981e40d6fd22417e731f21f88e589458519eb6ac4043f66d9fcf6e4a72f"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\test_harness.py",
+                               "sha256":  "97eed5b2156817d08b9e8a4519b784d50a688b536c0ccf8d926e851f8a5944d2"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\token_memory.py",
+                               "sha256":  "bf8761450bfdde9085001fa4180cc652342d56e543f0caba28bd064e4540db17"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\watchdog_service.py",
+                               "sha256":  "b46f5738894f65ac9d4d1322633cc74b2cf3cbe30faefaec73793bacc34cdf84"
+                           }
+                       ]
+}

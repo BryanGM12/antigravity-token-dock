@@ -1,0 +1,47 @@
+﻿{
+    "version":  "6.0.0",
+    "timestamp":  "2026-09-12T16:06:57.7924760-06:00",
+    "action_requested":  "Generate",
+    "texture_type":  "asphalt",
+    "destination_directory":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\textures",
+    "downloaded_maps_count":  0,
+    "downloaded_maps":  [
+
+                        ],
+    "generated_maps_count":  3,
+    "generated_maps":  [
+                           "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\textures\\asphalt_diffuse.png",
+                           "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\textures\\asphalt_normal.png",
+                           "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\assets\\textures\\asphalt_roughness.png"
+                       ],
+    "javascript_loader":  "// =========================================================================\n// ULTRA-GOAL PBR TEXTURE LOADER \u0026 PROCEDURAL FALLBACK (Three.js)\n// Carga mapas PBR o los genera dinÃ¡micamente en memoria vÃ­a CanvasTexture\n// =========================================================================\nimport * as THREE from \u0027https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js\u0027;\n\nexport class PBRTextureManager {\n    constructor() {\n        this.loader = new THREE.TextureLoader();\n        this.cache = new Map();\n    }\n\n    // Carga texturas desde archivos en disco o URLs\n    loadPBRMaterial(basePath, textureName, repeat = { x: 4, y: 4 }) {\n        const diffuse = this.loader.load(`${basePath}/${textureName}_diffuse.png`);\n        const normal = this.loader.load(`${basePath}/${textureName}_normal.png`);\n        const roughness = this.loader.load(`${basePath}/${textureName}_roughness.png`);\n\n        [diffuse, normal, roughness].forEach(tex =\u003e {\n            tex.wrapS = THREE.RepeatWrapping;\n            tex.wrapT = THREE.RepeatWrapping;\n            tex.repeat.set(repeat.x, repeat.y);\n        });\n\n        return new THREE.MeshStandardMaterial({\n            map: diffuse,\n            normalMap: normal,\n            roughnessMap: roughness,\n            roughness: 0.8,\n            metalness: 0.2\n        });\n    }\n\n    // Generador instantÃ¡neo procedural en VRAM (Cero dependencias externas)\n    createProceduralCanvasTexture(type = \u0027asphalt\u0027, size = 512) {\n        const canvas = document.createElement(\u0027canvas\u0027);\n        canvas.width = size;\n        canvas.height = size;\n        const ctx = canvas.getContext(\u00272d\u0027);\n        \n        ctx.fillStyle = type === \u0027asphalt\u0027 ? \u0027#2b2b2b\u0027 : \u0027#8b4513\u0027;\n        ctx.fillRect(0, 0, size, size);\n\n        // Ruido y gravilla\n        for (let i = 0; i \u003c 25000; i++) {\n            const x = Math.random() * size;\n            const y = Math.random() * size;\n            const lum = Math.floor(Math.random() * 80 + 30);\n            ctx.fillStyle = `rgb(${lum},${lum},${lum})`;\n            ctx.fillRect(x, y, 1.5, 1.5);\n        }\n\n        const texture = new THREE.CanvasTexture(canvas);\n        texture.wrapS = THREE.RepeatWrapping;\n        texture.wrapT = THREE.RepeatWrapping;\n        return texture;\n    }\n}",
+    "online_catalog":  {
+                           "brick":  {
+                                         "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/brick_diffuse.jpg",
+                                         "bump":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/brick_bump.jpg",
+                                         "roughness":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/brick_roughness.jpg"
+                                     },
+                           "cobblestone":  {
+                                               "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big.jpg",
+                                               "normal":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/water/Water_1_M_Normal.jpg",
+                                               "roughness":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/roughness_map.jpg"
+                                           },
+                           "wood":  {
+                                        "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/hardwood2_diffuse.jpg",
+                                        "bump":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/hardwood2_bump.jpg",
+                                        "roughness":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/hardwood2_roughness.jpg"
+                                    },
+                           "metal_crate":  {
+                                               "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/crate.gif",
+                                               "roughness":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/roughness_map.jpg"
+                                           },
+                           "ground_grass":  {
+                                                "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big.jpg",
+                                                "normal":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big-nm.jpg"
+                                            },
+                           "decal_bullet":  {
+                                                "diffuse":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/decal/decal-diffuse.png",
+                                                "normal":  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/decal/decal-normal.jpg"
+                                            }
+                       }
+}

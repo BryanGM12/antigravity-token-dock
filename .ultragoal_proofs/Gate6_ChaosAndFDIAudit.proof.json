@@ -1,0 +1,14 @@
+﻿{
+    "gate_name":  "Gate6_ChaosAndFDIAudit",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:26.8885556-06:00",
+    "prev_proof_hash":  "9c3c6972eeae8580350cf9b56adeb97fb5965278e9f1d683ff8de2541873da87",
+    "manifest_hash":  "c0174b1c7ad37f39c4fbd434dd767150d1fa29d9d506e5e41a32cf161e9154e1",
+    "proof_hash":  "9b0b6abfcd6c00c39533e970889adf043e8c2d31601f7522c0ffb06f20d827f2",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\FEATURE_DEPTH_REPORT.json",
+                               "sha256":  "991acd86335e7b83f1178d70f093c425c566b507704ac58ba7fdc4c0bdfb5509"
+                           }
+                       ]
+}

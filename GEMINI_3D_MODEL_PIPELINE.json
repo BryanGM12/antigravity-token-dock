@@ -1,0 +1,80 @@
+﻿{
+    "Stage_Id":  "STAGE_04",
+    "Name":  "Etapa 4: Pipeline de Modelos 3D \u0026 Conector Gemini Omni3D Neural Engine",
+    "Engine_Path":  "C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py",
+    "Skill_Reference":  "omni3d-generator (C:\\Users\\Administrator\\.gemini\\config\\skills\\omni3d-generator\\SKILL.md)",
+    "Anti_Toy_Rule":  "Erradicación Absoluta de \u0027Cubo con Cubitos\u0027 (Invariante 17 \u0026 18). Todo vehículo, personaje o prop complejo DEBE ser una malla continua .glb generada por Gemini Omni3D.",
+    "Total_Models":  5,
+    "Planned_Models":  [
+                           {
+                               "Model_Id":  "MOD_01_PLAYER",
+                               "Entity_Name":  "Player_Joel",
+                               "Archetype":  "character",
+                               "Prompt":  "post-apocalyptic survivor hero Joel Miller in tactical flannel jacket and leather boots",
+                               "Output_Path":  "assets/models/player_joel.glb",
+                               "Preview_Path":  "assets/models/previews/player_joel_render.png",
+                               "Min_Vertices":  1100,
+                               "Min_Faces":  2200,
+                               "Rigging":  "17_Joint_Humanoid_Rig",
+                               "Motion":  "walk",
+                               "CLI_Command":  "python \"C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py\" text \"post-apocalyptic survivor hero character\" --out \"assets/models/player_joel.glb\" --motion walk",
+                               "Anti_Toy_Note":  "PROHIBIDO usar BoxGeometry apilados (\u0027cubo con cubitos\u0027). Malla continua con rig y animación."
+                           },
+                           {
+                               "Model_Id":  "MOD_02_CLICKER",
+                               "Entity_Name":  "Infected_Clicker",
+                               "Archetype":  "clicker",
+                               "Prompt":  "Clicker fungal infected Cordyceps bloom head continuous SDF",
+                               "Output_Path":  "assets/models/clicker_the_last_of_us.glb",
+                               "Preview_Path":  "assets/models/previews/clicker_render.png",
+                               "Min_Vertices":  1200,
+                               "Min_Faces":  2400,
+                               "Rigging":  "17_Joint_Twitch_Rig",
+                               "Motion":  "twitch",
+                               "CLI_Command":  "python \"C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py\" clicker --out \"assets/models/clicker_the_last_of_us.glb\"",
+                               "Anti_Toy_Note":  "Floración fúngica continua con Marching Cubes y mandíbula desencajada."
+                           },
+                           {
+                               "Model_Id":  "MOD_03_VEHICLE",
+                               "Entity_Name":  "Abandoned_Sedan",
+                               "Archetype":  "vehicle",
+                               "Prompt":  "abandoned rusted post-apocalyptic civilian car with wheels and chassis",
+                               "Output_Path":  "assets/models/abandoned_sedan.glb",
+                               "Preview_Path":  "assets/models/previews/abandoned_sedan_render.png",
+                               "Min_Vertices":  1200,
+                               "Min_Faces":  2400,
+                               "Rigging":  "Wheel_Axle_Bases",
+                               "Motion":  "none",
+                               "CLI_Command":  "python \"C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py\" text \"heavy armored tactical combat vehicle with wheels and chassis\" --out \"assets/models/abandoned_sedan.glb\" --motion none",
+                               "Anti_Toy_Note":  "Chasis y cabina volumétricos continuos con ruedas separadas; PROHIBIDO coche de cubos."
+                           },
+                           {
+                               "Model_Id":  "MOD_04_WEAPON",
+                               "Entity_Name":  "Tactical_Firearm",
+                               "Archetype":  "weapon",
+                               "Prompt":  "tactical firearm with quad rail suppressor and sights",
+                               "Output_Path":  "assets/models/tactical_weapon.glb",
+                               "Preview_Path":  "assets/models/previews/tactical_weapon_render.png",
+                               "Min_Vertices":  800,
+                               "Min_Faces":  1600,
+                               "Rigging":  "Weapon_Bolt_Trigger",
+                               "Motion":  "none",
+                               "CLI_Command":  "python \"C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py\" weapon --out \"assets/models/tactical_weapon.glb\"",
+                               "Anti_Toy_Note":  "Receptor, empuñadura, rieles y cerrojo de alta precisión PBR."
+                           },
+                           {
+                               "Model_Id":  "MOD_05_SUPPLY_CRATE",
+                               "Entity_Name":  "Military_Supply_Crate",
+                               "Archetype":  "prop_crate",
+                               "Prompt":  "military steel ammunition supply crate with reinforced edges and latches",
+                               "Output_Path":  "assets/models/military_crate.glb",
+                               "Preview_Path":  "assets/models/previews/military_crate_render.png",
+                               "Min_Vertices":  400,
+                               "Min_Faces":  800,
+                               "Rigging":  "None",
+                               "Motion":  "none",
+                               "CLI_Command":  "python \"C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\omni3d-neural-motion-engine\\cli.py\" text \"military steel supply crate with reinforced edges and latches\" --out \"assets/models/military_crate.glb\" --motion none",
+                               "Anti_Toy_Note":  "Biseles, pestillos y texturizado PBR metálico verde oliva."
+                           }
+                       ]
+}

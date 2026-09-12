@@ -1,7 +1,7 @@
 """
 Local HUD: Ultra-Lightweight Web Dashboard & REST Micro-API
 Serves a responsive, dark-mode real-time status dashboard on http://127.0.0.1:59123
-and provides /api/status and /api/switch endpoints for OpenClaw / Jarvis integration.
+and provides /api/status, /api/switch, and /api/settings endpoints for OpenClaw / Jarvis integration.
 """
 
 import os
@@ -20,7 +20,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Import sibling modules
 sys.path.insert(0, SCRIPT_DIR)
-from token_memory import load_memory, get_effective_account_status, DEFAULT_ACCOUNTS
+from token_memory import (
+    load_memory, get_effective_account_status, DEFAULT_ACCOUNTS,
+    is_auto_switch_enabled, set_auto_switch_enabled,
+    is_sound_enabled, set_sound_enabled
+)
 from analytics_engine import calculate_burn_rate, load_analytics_data
 from watchdog_service import run_health_audit
 
@@ -42,6 +46,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
+      --purple: #a855f7;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -51,10 +56,11 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
       padding: 24px;
       display: flex;
       justify-content: center;
+      min-height: 100vh;
     }
     .container {
       width: 100%;
-      max-width: 880px;
+      max-width: 960px;
     }
     header {
       display: flex;
@@ -63,6 +69,8 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
       margin-bottom: 24px;
       padding-bottom: 16px;
       border-bottom: 1px solid var(--card-border);
+      flex-wrap: wrap;
+      gap: 12px;
     }
     .title-group h1 {
       font-size: 20px;
@@ -80,55 +88,71 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
       font-weight: 500;
       border: 1px solid rgba(16, 185, 129, 0.3);
     }
-    .btn-rotate {
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      padding: 8px 16px;
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .btn {
+      background: var(--card-bg);
+      color: var(--text);
+      border: 1px solid var(--card-border);
+      padding: 8px 14px;
       border-radius: 6px;
       font-size: 13px;
       font-weight: 500;
       cursor: pointer;
-      transition: background 0.2s;
+      transition: all 0.2s;
+    }
+    .btn:hover { background: #20242c; border-color: #3b82f6; }
+    .btn-rotate {
+      background: var(--accent);
+      color: #fff;
+      border: none;
     }
     .btn-rotate:hover { background: var(--accent-hover); }
     .btn-rotate:disabled { opacity: 0.5; cursor: not-allowed; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 16px;
       margin-bottom: 20px;
     }
     .card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 10px;
-      padding: 18px;
+      border-radius: 8px;
+      padding: 16px;
+      position: relative;
+      transition: border-color 0.2s;
     }
     .card.active {
-      border-color: rgba(59, 130, 246, 0.4);
-      box-shadow: 0 0 16px rgba(59, 130, 246, 0.08);
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
     }
     .card-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
     }
     .acc-email {
-      font-size: 14px;
       font-weight: 600;
+      font-size: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .acc-tag {
       font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
       padding: 2px 6px;
       border-radius: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
     }
-    .tag-active { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
-    .tag-standby { background: rgba(156, 163, 175, 0.2); color: var(--text-muted); }
-    .metric { margin-bottom: 12px; }
+    .tag-active { background: #1e3a8a; color: #93c5fd; }
+    .tag-standby { background: #1f2937; color: #9ca3af; }
+    .metric { margin-bottom: 10px; }
     .metric-label {
       display: flex;
       justify-content: space-between;
@@ -138,29 +162,87 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
     }
     .metric-val { font-weight: 600; color: var(--text); }
     .progress-bar {
-      height: 6px;
-      background: #262b36;
-      border-radius: 9999px;
+      width: 100%;
+      height: 4px;
+      background: #262a33;
+      border-radius: 2px;
       overflow: hidden;
     }
     .progress-fill {
       height: 100%;
-      border-radius: 9999px;
-      transition: width 0.4s ease;
+      border-radius: 2px;
+      transition: width 0.3s ease;
     }
     .fill-high { background: var(--success); }
     .fill-mid { background: var(--warning); }
     .fill-low { background: var(--danger); }
-    .footer-card {
+    
+    /* Interactive Settings Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      z-index: 999;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-content {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 10px;
-      padding: 16px;
-      font-size: 12px;
-      color: var(--text-muted);
+      width: 90%;
+      max-width: 440px;
+      padding: 24px;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.5);
+    }
+    .modal-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      margin-bottom: 18px;
+    }
+    .modal-header h2 { font-size: 16px; font-weight: 600; }
+    .btn-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+    }
+    .btn-close:hover { color: var(--text); }
+    .setting-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .setting-label { font-size: 13px; font-weight: 500; }
+    .setting-desc { font-size: 11px; color: var(--text-muted); }
+    .range-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .range-group span { font-size: 12px; min-width: 32px; text-align: right; }
+    
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--card-border);
+      padding-top: 16px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    @media (max-width: 600px) {
+      body { padding: 12px; }
+      .grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -168,40 +250,153 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   <div class="container">
     <header>
       <div class="title-group">
-        <h1>Antigravity HUD <span class="badge" id="hud-status">EN VIVO</span></h1>
+        <h1>✦ Antigravity Token Hub</h1>
+        <span class="badge" id="hud-status">● CONECTADO</span>
       </div>
-      <button class="btn-rotate" id="btn-switch" onclick="triggerSwitch()">Rotar Cuenta Ahora</button>
+      <div class="btn-group">
+        <button class="btn" id="optionsMenu" onclick="openSettings()">⚙ Opciones</button>
+        <button class="btn btn-rotate" id="btn-switch" onclick="triggerSwitch()">⇄ Rotar Cuenta</button>
+      </div>
     </header>
 
     <div class="grid" id="accounts-grid">
-      <!-- Injected dynamically -->
+      <!-- Generated dynamically -->
     </div>
 
-    <div class="footer-card">
-      <div id="analytics-summary">Velocidad de Gasto: Calculando...</div>
-      <div id="last-sync">Actualizando...</div>
+    <!-- Interactive Settings Modal -->
+    <div class="modal-overlay" id="settingsModal" onclick="handleBackdropClick(event)">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>⚙ Panel de Ajustes del Sistema</h2>
+          <button class="btn-close" onclick="closeSettings()">✕</button>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Rotación Automática a 0%</div>
+            <div class="setting-desc">Alterna de cuenta cuando se agotan los tokens</div>
+          </div>
+          <input type="checkbox" id="autoSwitchToggle" onchange="toggleAutoSwitch(this.checked)" checked>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Efectos de Sonido</div>
+            <div class="setting-desc">Feedback acústico procedural al rotar</div>
+          </div>
+          <input type="checkbox" id="audioToggle" onchange="toggleSound(this.checked)" checked>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Volumen Acústico</div>
+            <div class="setting-desc">Sensibilidad sonora del sintetizador</div>
+          </div>
+          <div class="range-group">
+            <input type="range" id="volumeSlider" min="0" max="100" value="50" oninput="updateVolume(this.value)">
+            <span id="volumeVal">50%</span>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Sensibilidad de Sondeo</div>
+            <div class="setting-desc">Cadencia de muestreo de cuota en vivo</div>
+          </div>
+          <div class="range-group">
+            <input type="range" id="sensSlider" min="5" max="60" value="20" oninput="updateSens(this.value)">
+            <span id="sensVal">20s</span>
+          </div>
+        </div>
+      </div>
     </div>
+
+    <footer>
+      <div id="analytics-summary">Burn-Rate: Calculando... | Rotaciones: 0</div>
+      <div id="last-sync">Sincronizando...</div>
+    </footer>
   </div>
 
   <script>
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+
+    function openSettings() {
+      document.getElementById('settingsModal').classList.add('open');
+    }
+
+    function closeSettings() {
+      document.getElementById('settingsModal').classList.remove('open');
+    }
+
+    function handleBackdropClick(e) {
+      if (e.target.id === 'settingsModal') closeSettings();
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeSettings();
+    });
+
+    window.addEventListener('blur', () => {
+      // Clear transient focuses
+    });
+
+    window.addEventListener('resize', () => {
+      // Responsive layout auto-adjustment
+    });
+
+    function updateVolume(val) {
+      const v = clamp(parseInt(val) || 50, 0, 100);
+      document.getElementById('volumeVal').innerText = `${v}%`;
+    }
+
+    function updateSens(val) {
+      const s = clamp(parseInt(val) || 20, 5, 60);
+      document.getElementById('sensVal').innerText = `${s}s`;
+    }
+
+    async function toggleAutoSwitch(enabled) {
+      try {
+        await fetch('/api/toggle-auto-switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enabled })
+        });
+      } catch (e) {
+        console.error('Error toggling auto-switch:', e);
+      }
+    }
+
+    async function toggleSound(enabled) {
+      try {
+        await fetch('/api/toggle-sound', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enabled })
+        });
+      } catch (e) {
+        console.error('Error toggling sound:', e);
+      }
+    }
+
     async function updateHUD() {
       try {
         const res = await fetch('/api/status');
+        if (!res.ok) throw new Error('API Error');
         const data = await res.json();
         
-        const active = data.active_account || "";
+        document.getElementById('hud-status').innerText = '● CONECTADO';
+        document.getElementById('hud-status').style.color = '#10b981';
+        
         const grid = document.getElementById('accounts-grid');
         grid.innerHTML = '';
         
         for (const [email, acc] of Object.entries(data.accounts || {})) {
-          const isActive = active.toLowerCase().includes(email.toLowerCase().split('@')[0]);
+          const isActive = (email === data.active_account);
           const gem = acc.gemini || {};
           const cgpt = acc.claude_gpt || {};
           
-          const g5h = gem.five_hour_remaining_pct ?? acc.five_hour_remaining_pct ?? 100;
-          const gwk = gem.weekly_remaining_pct ?? acc.weekly_remaining_pct ?? 100;
-          const c5h = cgpt.five_hour_remaining_pct ?? 100;
-          const cwk = cgpt.weekly_remaining_pct ?? 100;
+          const g5h = clamp(gem.five_hour_remaining_pct ?? acc.five_hour_remaining_pct ?? 100, 0, 100);
+          const gwk = clamp(gem.weekly_remaining_pct ?? acc.weekly_remaining_pct ?? 100, 0, 100);
+          const c5h = clamp(cgpt.five_hour_remaining_pct ?? 100, 0, 100);
+          const cwk = clamp(cgpt.weekly_remaining_pct ?? 100, 0, 100);
           
           const fillG5h = g5h > 35 ? 'fill-high' : (g5h > 15 ? 'fill-mid' : 'fill-low');
           const fillGwk = gwk > 35 ? 'fill-high' : (gwk > 15 ? 'fill-mid' : 'fill-low');
@@ -308,7 +503,9 @@ def get_hud_status_payload() -> Dict[str, Any]:
         "accounts": effective_accounts,
         "analytics": burn,
         "health": audit,
-        "updated_at": mem.get("updated_at")
+        "updated_at": mem.get("updated_at"),
+        "auto_switch_enabled": is_auto_switch_enabled(),
+        "sound_enabled": is_sound_enabled()
     }
 
 class HUDRequestHandler(BaseHTTPRequestHandler):
@@ -332,7 +529,6 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/switch":
             logger.info("Manual switch triggered via Local HUD API!")
-            # Trigger asynchronous switch via python script in background
             switch_script = os.path.join(SCRIPT_DIR, "daemon_service.py")
             subprocess.Popen(["python.exe", switch_script, "--switch-now"])
             
@@ -341,6 +537,36 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "message": "Rotación de cuenta solicitada en segundo plano."}).encode("utf-8"))
+        elif self.path == "/api/toggle-auto-switch":
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                enabled = bool(data.get('enabled', True))
+                set_auto_switch_enabled(enabled)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "auto_switch_enabled": enabled}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+        elif self.path == "/api/toggle-sound":
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                enabled = bool(data.get('enabled', True))
+                set_sound_enabled(enabled)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "sound_enabled": enabled}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()

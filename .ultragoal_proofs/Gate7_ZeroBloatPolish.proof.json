@@ -1,0 +1,14 @@
+﻿{
+    "gate_name":  "Gate7_ZeroBloatPolish",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:31.6784510-06:00",
+    "prev_proof_hash":  "9b0b6abfcd6c00c39533e970889adf043e8c2d31601f7522c0ffb06f20d827f2",
+    "manifest_hash":  "c50160b5d2f85653e891dca7f06b94eebed435787871e70fbc884d7d9e63b555",
+    "proof_hash":  "3a2d795f8ad4f188057ab687ee3209be3265ac88e84cbad5d7f4657bb0a1b1d1",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\PROJECT_CLEAN_MANIFEST.json",
+                               "sha256":  "30c9d19823a3a97fbd9adbdc4a19bd51aa4eae56e13420e661672f97a65f5b67"
+                           }
+                       ]
+}

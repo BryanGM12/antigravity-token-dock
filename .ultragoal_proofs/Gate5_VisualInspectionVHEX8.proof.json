@@ -1,0 +1,26 @@
+﻿{
+    "gate_name":  "Gate5_VisualInspectionVHEX8",
+    "status":  "SEALED",
+    "timestamp":  "2026-09-12T16:10:21.8459685-06:00",
+    "prev_proof_hash":  "b169bfef90fc3eb2a8eeda8d436bffb2e0ae61ffd73048914e6287466052bbce",
+    "manifest_hash":  "0e733dad59278c4ed2f58746cc1824b1dcaa72f0d621d85fcf38e369b9a225eb",
+    "proof_hash":  "9c3c6972eeae8580350cf9b56adeb97fb5965278e9f1d683ff8de2541873da87",
+    "files_manifest":  [
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\VISUAL_INSPECTION_REPORT.md",
+                               "sha256":  "b8de62546d0d0f8957dd07b588f9f005d48eef676652923d4b612c313bf0ffbe"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\docs\\assets\\dock_preview_collapsed.png",
+                               "sha256":  "32023e17bef4cbdbdec07343cb59a9a71441a57736a2199812980317f07fcc55"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\docs\\assets\\dock_preview_context_menu.png",
+                               "sha256":  "9bfc96c472fa7b66f44b45fc1368bc0353b57350a797379d3bceeabc271dbeb7"
+                           },
+                           {
+                               "path":  "C:\\Users\\Administrator\\.openclaw\\workspace\\scripts\\antigravity_account_controller\\docs\\assets\\dock_preview_expanded.png",
+                               "sha256":  "6ee3db9dbd95e0e6f996624e2465c3cdd33bac4c55386d90d9e9d2a61be3eb60"
+                           }
+                       ]
+}
