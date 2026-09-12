@@ -910,6 +910,12 @@ class MinimalistPillHandle(QFrame):
         self.is_expanded = False
         self.is_hovered = False
         self.pulse_val = 0.0
+        self.dock_side = "left"
+
+    def set_dock_side(self, side: str):
+        if self.dock_side != side:
+            self.dock_side = side
+            self.update()
 
     def enterEvent(self, event):
         self.is_hovered = True
@@ -953,16 +959,27 @@ class MinimalistPillHandle(QFrame):
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, 1))
 
-        # Rounded outer edge
+        # Adaptive border curvature: round edge facing screen interior
         path = QPainterPath()
         r = 8.0
-        path.moveTo(0, 0)
-        path.lineTo(w - r, 0)
-        path.arcTo(w - 2 * r, 0, 2 * r, 2 * r, 90, -90)
-        path.lineTo(w, h - r)
-        path.arcTo(w - 2 * r, h - 2 * r, 2 * r, 2 * r, 0, -90)
-        path.lineTo(0, h)
-        path.closeSubpath()
+        if self.dock_side == "right":
+            # Pill docked at screen right edge: round left border, flat right border
+            path.moveTo(w, 0)
+            path.lineTo(r, 0)
+            path.arcTo(0, 0, 2 * r, 2 * r, 90, 90)
+            path.lineTo(0, h - r)
+            path.arcTo(0, h - 2 * r, 2 * r, 2 * r, 180, 90)
+            path.lineTo(w, h)
+            path.closeSubpath()
+        else:
+            # Pill docked at Antigravity outer right: flat left border, round right border
+            path.moveTo(0, 0)
+            path.lineTo(w - r, 0)
+            path.arcTo(w - 2 * r, 0, 2 * r, 2 * r, 90, -90)
+            path.lineTo(w, h - r)
+            path.arcTo(w - 2 * r, h - 2 * r, 2 * r, 2 * r, 0, -90)
+            path.lineTo(0, h)
+            path.closeSubpath()
         painter.drawPath(path)
 
         # Gemini Star Icon ✦ (with subtle breathing glow)
@@ -975,10 +992,13 @@ class MinimalistPillHandle(QFrame):
         painter.setPen(QPen(QColor(59, 130, 246, 140 if self.is_hovered else 60), 1.5))
         painter.drawLine(w // 2, 36, w // 2, h - 32)
 
-        # Chevron Arrow › / ‹
+        # Chevron Arrow › / ‹ (adapts to dock side)
         painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         painter.setPen(QColor("#ffffff" if self.is_hovered else "#888888"))
-        arrow = "‹" if self.is_expanded else "›"
+        if self.dock_side == "right":
+            arrow = "›" if self.is_expanded else "‹"
+        else:
+            arrow = "‹" if self.is_expanded else "›"
         painter.drawText(QRect(0, h - 26, w, 18), Qt.AlignmentFlag.AlignCenter, arrow)
 
 
@@ -1018,6 +1038,7 @@ class AntigravityDockedOverlay(QWidget):
         self.sync_spin_step = 0
         self.last_toggle_time = 0.0
         self.is_dialog_active = False
+        self.current_dock_mode = "outside_right"
 
         self.init_window_flags()
         self.init_ui()
@@ -1131,8 +1152,13 @@ class AntigravityDockedOverlay(QWidget):
         self.pill_handle.clicked.connect(self.toggle_expanded)
         self.pill_handle.right_clicked.connect(self.show_dock_context_menu)
 
-        # 2. Minimalist Expanded Container (360px target)
-        self.panel_container = QFrame()
+        # 2. Stretch spacer for inside_right animation
+        self.stretch_widget = QWidget(self)
+        self.stretch_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.stretch_widget.setVisible(False)
+
+        # 3. Minimalist Expanded Container (410px target)
+        self.panel_container = QFrame(self)
         self.panel_container.setObjectName("PanelContainer")
         self.panel_container.setFixedWidth(0)
         self.panel_container.setStyleSheet("""
@@ -1380,12 +1406,33 @@ class AntigravityDockedOverlay(QWidget):
         footer_layout.addWidget(btn_backup)
         panel_layout.addLayout(footer_layout)
 
-        # Add to main layout (pin pill_handle to top so it never drifts vertically)
-        self.main_layout.addWidget(self.pill_handle, 0, Qt.AlignmentFlag.AlignTop)
-        self.main_layout.addWidget(self.panel_container, 1)
+        self.apply_dock_mode_layout(self.current_dock_mode)
         self.panel_container.setVisible(False)
-
         self.set_collapsed_geometry()
+
+    def apply_dock_mode_layout(self, mode: str):
+        """Dynamically arranges widgets in main_layout depending on dock mode."""
+        self.current_dock_mode = mode
+        while self.main_layout.count() > 0:
+            self.main_layout.takeAt(0)
+
+        if mode == "inside_right":
+            self.pill_handle.set_dock_side("right")
+            self.stretch_widget.setVisible(self.is_expanded)
+            self.panel_container.setVisible(self.is_expanded)
+            self.main_layout.addWidget(self.stretch_widget, 1)
+            self.main_layout.addWidget(self.panel_container, 0)
+            self.main_layout.addWidget(self.pill_handle, 0, Qt.AlignmentFlag.AlignTop)
+        else:
+            self.pill_handle.set_dock_side("left")
+            self.stretch_widget.setVisible(False)
+            self.panel_container.setVisible(self.is_expanded)
+            self.main_layout.addWidget(self.pill_handle, 0, Qt.AlignmentFlag.AlignTop)
+            self.main_layout.addWidget(self.panel_container, 1)
+
+    def set_dock_mode(self, mode: str):
+        if self.current_dock_mode != mode:
+            self.apply_dock_mode_layout(mode)
 
     def init_animations(self):
         """Initializes 60 FPS hardware-accelerated slide animation with easing curve and opacity fade."""
@@ -1437,11 +1484,7 @@ class AntigravityDockedOverlay(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self.is_expanded:
-                self.toggle_expanded()
-                event.accept()
-                return
-            elif event.pos().x() <= 28:
+            if not self.is_expanded or self.pill_handle.geometry().contains(event.pos()):
                 self.toggle_expanded()
                 event.accept()
                 return
@@ -1497,11 +1540,11 @@ class AntigravityDockedOverlay(QWidget):
         self.setMaximumSize(16777215, 16777215)
         self.setFixedSize(28, 110)
 
-    def prepare_expanded_window_geometry(self):
-        """Pre-sizes top-level window to target expanded dimensions ONCE, preventing DWM reallocation hitching."""
-        if not self.antigravity_hwnd or not user32.IsWindow(self.antigravity_hwnd):
-            return
-
+    def calculate_dock_geometry(self, for_expanded: bool) -> tuple[int, int, int, int, str]:
+        """
+        Calculates dock coordinates and mode (outside_right vs inside_right).
+        Handles maximized, snapped, and floating states with zero-jump pill handle positioning.
+        """
         ag_rect = wintypes.RECT()
         hr = dwmapi.DwmGetWindowAttribute(self.antigravity_hwnd, 9, ctypes.byref(ag_rect), ctypes.sizeof(ag_rect))
         if hr != 0:
@@ -1516,27 +1559,60 @@ class AntigravityDockedOverlay(QWidget):
         work_r = mi.rcWork
 
         is_maximized = bool(user32.IsZoomed(self.antigravity_hwnd))
-        widget_w = 28 + self.PANEL_TARGET_WIDTH
-        widget_h = min(680, max(460, ag_h - 40))
-
+        total_w = 28 + self.PANEL_TARGET_WIDTH
         space_right = work_r.right - ag_rect.right
-        space_left = ag_rect.left - work_r.left
 
-        if is_maximized:
-            target_x = ag_rect.right - widget_w - 12
-            target_y = ag_rect.top + 38
-        elif space_right >= widget_w:
-            target_x = ag_rect.right
-            target_y = ag_rect.top + 48
-        elif space_left >= widget_w:
-            target_x = ag_rect.left - widget_w
-            target_y = ag_rect.top + 48
+        # Inside-right if maximized or window right edge has less space than total width
+        if is_maximized or space_right < (total_w + 10):
+            mode = "inside_right"
+            pill_screen_x = min(work_r.right, ag_rect.right) - 28 - 2
+            # Clear title bar window controls (min/max/close buttons in top ~45px)
+            target_y = max(work_r.top + 75, ag_rect.top + 75)
+            max_avail_h = work_r.bottom - target_y - 12
+            expanded_h = min(680, max(460, max_avail_h))
+
+            if for_expanded:
+                target_x = pill_screen_x - self.PANEL_TARGET_WIDTH
+                widget_w = total_w
+                widget_h = expanded_h
+            else:
+                target_x = pill_screen_x
+                widget_w = 28
+                widget_h = 110
         else:
-            target_x = ag_rect.right - widget_w - 8
-            target_y = ag_rect.top + 42
+            mode = "outside_right"
+            expanded_h = min(680, max(460, ag_h - 40))
+            target_y = ag_rect.top + 48
+            if for_expanded:
+                target_x = ag_rect.right
+                widget_w = total_w
+                widget_h = expanded_h
+            else:
+                target_x = ag_rect.right
+                widget_w = 28
+                widget_h = 110
 
-        if target_y + widget_h > work_r.bottom:
-            target_y = max(work_r.top, work_r.bottom - widget_h - 8)
+            if target_y + widget_h > work_r.bottom:
+                target_y = max(work_r.top, work_r.bottom - widget_h - 8)
+
+        return target_x, target_y, widget_w, widget_h, mode
+
+    def prepare_expanded_window_geometry(self):
+        """Pre-sizes top-level window to target expanded dimensions ONCE, preventing DWM reallocation hitching."""
+        if not self.antigravity_hwnd or not user32.IsWindow(self.antigravity_hwnd):
+            return
+
+        target_x, target_y, widget_w, widget_h, mode = self.calculate_dock_geometry(for_expanded=True)
+        self.set_dock_mode(mode)
+
+        if mode == "inside_right":
+            self.stretch_widget.setVisible(True)
+            self.panel_container.setVisible(True)
+            self.panel_container.setFixedWidth(0)
+        else:
+            self.stretch_widget.setVisible(False)
+            self.panel_container.setVisible(True)
+            self.panel_container.setFixedWidth(0)
 
         self.last_rect = (target_x, target_y, widget_w, widget_h)
         self.setMinimumSize(0, 0)
@@ -1580,12 +1656,14 @@ class AntigravityDockedOverlay(QWidget):
     def on_slide_finished(self):
         if not self.is_expanded:
             self.panel_container.setVisible(False)
+            self.stretch_widget.setVisible(False)
             self.current_panel_w = 0
             self.panel_opacity.setOpacity(0.0)
             self.set_collapsed_geometry()
             self.update_dock_position(force=True)
         else:
             self.current_panel_w = self.PANEL_TARGET_WIDTH
+            self.panel_container.setFixedWidth(self.PANEL_TARGET_WIDTH)
             self.panel_opacity.setOpacity(1.0)
             QTimer.singleShot(40, self.refresh_memory_data)
 
@@ -1622,47 +1700,8 @@ class AntigravityDockedOverlay(QWidget):
                             self.toggle_expanded()
                             return
 
-        ag_rect = wintypes.RECT()
-        hr = dwmapi.DwmGetWindowAttribute(self.antigravity_hwnd, 9, ctypes.byref(ag_rect), ctypes.sizeof(ag_rect))
-        if hr != 0:
-            user32.GetWindowRect(self.antigravity_hwnd, ctypes.byref(ag_rect))
-
-        ag_h = ag_rect.bottom - ag_rect.top
-
-        # Monitor work area
-        hmon = user32.MonitorFromWindow(self.antigravity_hwnd, 2)
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
-        user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
-        work_r = mi.rcWork
-
-        is_maximized = bool(user32.IsZoomed(self.antigravity_hwnd))
-
-        if self.is_expanded:
-            widget_w = 28 + self.PANEL_TARGET_WIDTH
-            widget_h = min(680, max(460, ag_h - 40))
-        else:
-            widget_w = 28
-            widget_h = 110
-
-        space_right = work_r.right - ag_rect.right
-        space_left = ag_rect.left - work_r.left
-
-        if is_maximized:
-            target_x = ag_rect.right - widget_w - 12
-            target_y = ag_rect.top + 38
-        elif space_right >= widget_w:
-            target_x = ag_rect.right
-            target_y = ag_rect.top + 48
-        elif space_left >= widget_w:
-            target_x = ag_rect.left - widget_w
-            target_y = ag_rect.top + 48
-        else:
-            target_x = ag_rect.right - widget_w - 8
-            target_y = ag_rect.top + 42
-
-        if target_y + widget_h > work_r.bottom:
-            target_y = max(work_r.top, work_r.bottom - widget_h - 8)
+        target_x, target_y, widget_w, widget_h, mode = self.calculate_dock_geometry(for_expanded=self.is_expanded)
+        self.set_dock_mode(mode)
 
         current_geometry = (target_x, target_y, widget_w, widget_h)
         if self.last_rect != current_geometry:

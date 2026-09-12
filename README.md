@@ -53,9 +53,11 @@ When building complex multi-agent architectures or running autonomous tasks in *
   - Automatically activates the Account Daemon and Docked Widget the instant **Google Antigravity IDE** is opened or active.
   - Automatically puts services to sleep and cleans up memory when Antigravity is closed.
   - Integrates permanently with Windows Task Scheduler (`AntigravityAutoActivator`) and WMI process creation events for zero-manual-effort workflow.
-- **▪ Zero-Lag Win32 Edge Docking**:
+- **▪ Zero-Lag Win32 Edge Docking & Adaptive Maximized System**:
   - Hooks directly into Windows native `EVENT_OBJECT_LOCATIONCHANGE` with an adaptive 25ms/80ms heartbeat.
-  - Automatically sticks to the right or left edge of Antigravity IDE during window move, resize, minimize, or maximize across multiple monitors.
+  - Automatically transitions between outside-right docking (when floating) and inside-right flush docking (when Antigravity is maximized or snapped).
+  - **Zero-Jump Handle Architecture**: Mathematical coordinate anchoring keeps the pill handle at the exact same screen pixel coordinates when collapsed, animating, or fully expanded.
+  - **Title Bar Clearance**: Offsets the docked tab safely below window management controls (+75px), preventing any obstruction to minimize, maximize/restore, or close buttons (`✕`).
 - **▪ Stutter-Free 60 FPS Fluid Animations**:
   - Hardware-optimized `QVariantAnimation` with `OutCubic` easing.
   - Pre-allocated transparent canvas avoids Windows DWM reallocation hitches for instant, silky-smooth slide transitions.
@@ -94,6 +96,7 @@ When building complex multi-agent architectures or running autonomous tasks in *
 **Antigravity Token Dock** es un widget de escritorio nativo para Windows diseñado para eliminar los límites de cuota de tokens en **Google Antigravity IDE**.
 
 - Se acopla magnéticamente al borde de la ventana de Antigravity sin latencia (Win32 Hook).
+- **Soporte total para ventana maximizada**: Se adapta automáticamente al maximizar Antigravity, colocándose al ras del borde interior derecho sin tapar los botones de la barra de título (minimizar, maximizar, cerrar) y manteniendo la pestaña en la misma posición de pantalla sin saltos bruscos.
 - Ordena automáticamente tus cuentas: la cuenta activa siempre arriba, y las que se quedan sin cuota se mueven al fondo.
 - Muestra el día exacto de restablecimiento (`Mañana 04:19`, `Viernes 15:59`, etc.).
 - Permite rotar cuentas con 1 clic o de forma 100% automática en segundo plano.
