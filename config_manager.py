@@ -20,10 +20,10 @@ STATE_CONFIG_FILE = STATE_DIR / "accounts_config.json"
 EXAMPLE_CONFIG_FILE = BASE_DIR / "accounts_config.example.json"
 
 DEFAULT_TEMPLATE_ACCOUNTS = [
-    {"email": "account1.pro@gmail.com", "name": "Account 1", "tier": "👑 Pro"},
-    {"email": "account2.pro@gmail.com", "name": "Account 2", "tier": "👑 Pro"},
-    {"email": "account3.pro@gmail.com", "name": "Account 3", "tier": "👑 Pro"},
-    {"email": "account4.pro@gmail.com", "name": "Account 4", "tier": "👑 Pro"}
+    {"email": "account1.pro@gmail.com", "name": "Account 1", "tier": "✦ Pro"},
+    {"email": "account2.pro@gmail.com", "name": "Account 2", "tier": "✦ Pro"},
+    {"email": "account3.pro@gmail.com", "name": "Account 3", "tier": "✦ Pro"},
+    {"email": "account4.pro@gmail.com", "name": "Account 4", "tier": "✦ Pro"}
 ]
 
 def ensure_config_dir():
@@ -115,7 +115,7 @@ def save_accounts_config(accounts: List[Dict[str, Any]], target_path: Optional[P
 def add_account(
     email: str,
     name: Optional[str] = None,
-    tier: str = "👑 Pro",
+    tier: str = "✦ Pro",
     tab_index: Optional[int] = None,
     row_offset: Optional[int] = None
 ) -> Dict[str, Any]:
@@ -192,7 +192,7 @@ def interactive_add_wizard():
         name = email.split('@')[0].capitalize()
 
     pro_ans = input("  ▸ ¿Es cuenta Pro / Ultra con cuotas altas? (S/n): ").strip().lower()
-    tier = "👑 Pro" if pro_ans in ["", "s", "si", "y", "yes"] else "Standard"
+    tier = "✦ Pro" if pro_ans in ["", "s", "si", "y", "yes"] else "Standard"
 
     acc = add_account(email, name=name, tier=tier)
     print("----------------------------------------------------------")
@@ -245,7 +245,7 @@ def export_accounts_backup(dest_path: Path) -> bool:
     """Exports clean accounts configuration to specified path."""
     try:
         accs = get_authorized_accounts()
-        clean = [{"email": a["email"], "name": a.get("name", ""), "tier": a.get("tier", "👑 Pro")} for a in accs]
+        clean = [{"email": a["email"], "name": a.get("name", ""), "tier": a.get("tier", "✦ Pro")} for a in accs]
         with open(dest_path, "w", encoding="utf-8") as f:
             json.dump({"accounts": clean, "version": "2.0"}, f, indent=2, ensure_ascii=False)
         return True
@@ -263,7 +263,7 @@ def import_accounts_backup(src_path: Path) -> int:
         imported = 0
         for item in acc_list:
             if isinstance(item, dict) and "email" in item:
-                add_account(item["email"], name=item.get("name"), tier=item.get("tier", "👑 Pro"))
+                add_account(item["email"], name=item.get("name"), tier=item.get("tier", "✦ Pro"))
                 imported += 1
         return imported
     except Exception:
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gestor de Cuentas para Antigravity Token Dock")
     parser.add_argument("--add", help="Correo de la cuenta a agregar")
     parser.add_argument("--name", help="Nombre descriptivo de la cuenta", default=None)
-    parser.add_argument("--tier", help="Nivel de la cuenta (default: '👑 Pro')", default="👑 Pro")
+    parser.add_argument("--tier", help="Nivel de la cuenta (default: '✦ Pro')", default="✦ Pro")
     parser.add_argument("--remove", help="Correo de la cuenta a eliminar")
     parser.add_argument("--list", action="store_true", help="Listar todas las cuentas configuradas")
     parser.add_argument("--interactive", action="store_true", help="Iniciar asistente interactivo por consola")

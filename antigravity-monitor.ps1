@@ -1,15 +1,18 @@
-# Antigravity Account Daemon & Docked Widget Controller
+﻿# Antigravity Account Daemon, Docked Widget & Auto-Activator Controller
 [CmdletBinding()]
 param(
     [Parameter(Position=0)]
-    [ValidateSet("start", "stop", "status", "restart", "widget", "hud", "analytics", "health", "notify-test", "add", "list", "remove")]
+    [ValidateSet("start", "stop", "status", "restart", "activator", "widget", "hud", "analytics", "health", "notify-test", "add", "list", "remove")]
     [string]$Action = "status"
 )
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StateDir = "$env:USERPROFILE\.openclaw\workspace\state\antigravity_controller"
 $PidFile = "$StateDir\daemon.pid"
 $WidgetPidFile = "$StateDir\widget.pid"
+$ActivatorPidFile = "$StateDir\activator.pid"
 $LogFile = "$StateDir\controller.log"
 
 if (-not (Test-Path $StateDir)) {
@@ -56,13 +59,59 @@ function Get-WidgetProcess {
     return $null
 }
 
+function Get-ActivatorProcess {
+    if (Test-Path $ActivatorPidFile) {
+        $savedPid = Get-Content $ActivatorPidFile -ErrorAction SilentlyContinue
+        if ($savedPid) {
+            $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -match "python") {
+                return $proc
+            }
+        }
+    }
+    $procs = Get-CimInstance Win32_Process -Filter "Name like '%python%'" | Where-Object { $_.CommandLine -like "*antigravity_auto_activator.py*" }
+    if ($procs -and $procs.Count -gt 0) {
+        return (Get-Process -Id $procs[0].ProcessId -ErrorAction SilentlyContinue)
+    }
+    if ($procs -and $procs.ProcessId) {
+        return (Get-Process -Id $procs.ProcessId -ErrorAction SilentlyContinue)
+    }
+    return $null
+}
+
+function Test-AntigravityRunning {
+    $ag = Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue
+    return ($ag -ne $null)
+}
+
 switch ($Action.ToLower()) {
     "start" {
+        Write-Host "=====================================================" -ForegroundColor Cyan
+        Write-Host "   ✦ INICIANDO SISTEMA DE CONTROL DE ANTIGRAVITY ✦   " -ForegroundColor Cyan
+        Write-Host "=====================================================" -ForegroundColor Cyan
+
+        # 1. Start Auto-Activator
+        $actProc = Get-ActivatorProcess
+        if ($actProc) {
+            Write-Host "[!] Auto-Activador ya activo (PID: $($actProc.Id))." -ForegroundColor Yellow
+        } else {
+            Write-Host "[+] Iniciando Auto-Activador en segundo plano..." -ForegroundColor Cyan
+            $actP = Start-Process -FilePath "pythonw.exe" `
+                -ArgumentList @("$ScriptDir\antigravity_auto_activator.py", "--daemon") `
+                -WorkingDirectory $ScriptDir `
+                -PassThru
+            if ($actP) {
+                $actP.Id | Out-File -FilePath $ActivatorPidFile -Force -Encoding ascii
+                Write-Host "[OK] Auto-Activador iniciado (PID: $($actP.Id))." -ForegroundColor Green
+            }
+        }
+
+        # 2. Start Daemon
         $existing = Get-DaemonProcess
         if ($existing) {
-            Write-Host "[!] El daemon ya esta activo (PID: $($existing.Id))." -ForegroundColor Yellow
+            Write-Host "[!] Daemon ya activo (PID: $($existing.Id))." -ForegroundColor Yellow
         } else {
-            Write-Host "[+] Iniciando daemon en segundo plano..." -ForegroundColor Cyan
+            Write-Host "[+] Iniciando Daemon en segundo plano..." -ForegroundColor Cyan
             $argsList = @("$ScriptDir\daemon_service.py", "--daemon")
             $proc = Start-Process -FilePath "pythonw.exe" `
                 -ArgumentList $argsList `
@@ -71,16 +120,16 @@ switch ($Action.ToLower()) {
             if ($proc) {
                 $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii
                 Start-Sleep -Seconds 1
-                Write-Host "[OK] Daemon de Antigravity iniciado (PID: $($proc.Id))." -ForegroundColor Green
+                Write-Host "[OK] Daemon iniciado exitosamente (PID: $($proc.Id))." -ForegroundColor Green
             }
         }
 
-        # Also start docked widget
+        # 3. Start Docked Widget
         $wProc = Get-WidgetProcess
         if ($wProc) {
-            Write-Host "[!] El widget acoplado ya esta activo (PID: $($wProc.Id))." -ForegroundColor Yellow
+            Write-Host "[!] Widget acoplado ya activo (PID: $($wProc.Id))." -ForegroundColor Yellow
         } else {
-            Write-Host "[+] Iniciando widget acoplado nativo a Antigravity..." -ForegroundColor Cyan
+            Write-Host "[+] Iniciando Widget acoplado nativo a Antigravity..." -ForegroundColor Cyan
             $newW = Start-Process -FilePath "pythonw.exe" `
                 -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
                 -WorkingDirectory $ScriptDir `
@@ -90,6 +139,10 @@ switch ($Action.ToLower()) {
                 Write-Host "[OK] Widget acoplado iniciado exitosamente (PID: $($newW.Id))." -ForegroundColor Green
             }
         }
+    }
+
+    "activator" {
+        & python.exe "$ScriptDir\antigravity_auto_activator.py" --status
     }
 
     "widget" {
@@ -111,45 +164,63 @@ switch ($Action.ToLower()) {
 
     "stop" {
         $allProcs = Get-CimInstance Win32_Process -Filter "Name like '%python%'" | Where-Object { 
-            $_.CommandLine -like "*daemon_service.py*" -or $_.CommandLine -like "*antigravity_docked_overlay.py*" 
+            $_.CommandLine -like "*daemon_service.py*" -or $_.CommandLine -like "*antigravity_docked_overlay.py*" -or $_.CommandLine -like "*antigravity_auto_activator.py*"
         }
         if ($allProcs) {
             foreach ($dp in $allProcs) {
-                Write-Host "[*] Deteniendo proceso (PID: $($dp.ProcessId))..." -ForegroundColor Yellow
+                Write-Host "[-] Deteniendo proceso (PID: $($dp.ProcessId))..." -ForegroundColor Yellow
                 Stop-Process -Id $dp.ProcessId -Force -ErrorAction SilentlyContinue
             }
         }
         if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
         if (Test-Path $WidgetPidFile) { Remove-Item $WidgetPidFile -Force -ErrorAction SilentlyContinue }
-        Write-Host "[OK] Todos los servicios y widgets de Antigravity detenidos." -ForegroundColor Green
+        if (Test-Path $ActivatorPidFile) { Remove-Item $ActivatorPidFile -Force -ErrorAction SilentlyContinue }
+        Write-Host "[OK] Todos los servicios, activador y widget han sido detenidos." -ForegroundColor Green
     }
 
     "status" {
         $proc = Get-DaemonProcess
         $wProc = Get-WidgetProcess
+        $actProc = Get-ActivatorProcess
+        $agRunning = Test-AntigravityRunning
+
         Write-Host "=====================================================" -ForegroundColor Cyan
-        Write-Host "     ESTADO DEL MONITOR AUTO-SWITCH & WIDGET         " -ForegroundColor Cyan
+        Write-Host "   ✦ ESTADO DEL MONITOR AUTO-SWITCH & ACTIVADOR ✦    " -ForegroundColor Cyan
         Write-Host "=====================================================" -ForegroundColor Cyan
+        if ($agRunning) {
+            Write-Host " Antigravity IDE: [● ACTIVO] (Ventana en ejecucion)" -ForegroundColor Green
+        } else {
+            Write-Host " Antigravity IDE: [✕ INACTIVO] (Cerrado)" -ForegroundColor Gray
+        }
+
+        if ($actProc) {
+            Write-Host " Auto-Activador:  [● ACTIVO] (Supervisando ciclo de vida, PID: $($actProc.Id))" -ForegroundColor Green
+        } else {
+            Write-Host " Auto-Activador:  [✕ INACTIVO]" -ForegroundColor Gray
+        }
+
         if ($proc) {
-            Write-Host " Daemon: ACTIVO (PID: $($proc.Id))" -ForegroundColor Green
+            Write-Host " Daemon Rotador:  [● ACTIVO] (PID: $($proc.Id))" -ForegroundColor Green
         } else {
-            Write-Host " Daemon: INACTIVO (Detenido)" -ForegroundColor Gray
+            Write-Host " Daemon Rotador:  [✕ INACTIVO]" -ForegroundColor Gray
         }
+
         if ($wProc) {
-            Write-Host " Widget: ACTIVO (Acoplado a ventana Antigravity, PID: $($wProc.Id))" -ForegroundColor Green
+            Write-Host " Widget Acoplado: [● ACTIVO] (Acoplado a ventana, PID: $($wProc.Id))" -ForegroundColor Green
         } else {
-            Write-Host " Widget: INACTIVO (Detenido)" -ForegroundColor Gray
+            Write-Host " Widget Acoplado: [✕ INACTIVO]" -ForegroundColor Gray
         }
-        Write-Host " Log:    $LogFile" -ForegroundColor DarkGray
-        Write-Host " HUD:    http://127.0.0.1:59123" -ForegroundColor Cyan
+
+        Write-Host " Log Principal:   $LogFile" -ForegroundColor DarkGray
+        Write-Host " HUD Web:         http://127.0.0.1:59123" -ForegroundColor Cyan
         Write-Host "-----------------------------------------------------"
         & python.exe "$ScriptDir\daemon_service.py" --status
     }
 
     "restart" {
-        # Stop both
+        # Stop all
         $allProcs = Get-CimInstance Win32_Process -Filter "Name like '%python%'" | Where-Object { 
-            $_.CommandLine -like "*daemon_service.py*" -or $_.CommandLine -like "*antigravity_docked_overlay.py*" 
+            $_.CommandLine -like "*daemon_service.py*" -or $_.CommandLine -like "*antigravity_docked_overlay.py*" -or $_.CommandLine -like "*antigravity_auto_activator.py*"
         }
         if ($allProcs) {
             foreach ($dp in $allProcs) {
@@ -158,55 +229,58 @@ switch ($Action.ToLower()) {
         }
         if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
         if (Test-Path $WidgetPidFile) { Remove-Item $WidgetPidFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $ActivatorPidFile) { Remove-Item $ActivatorPidFile -Force -ErrorAction SilentlyContinue }
         Start-Sleep -Seconds 1
 
-        # Start both
+        # Start activator
+        $actP = Start-Process -FilePath "pythonw.exe" `
+            -ArgumentList @("$ScriptDir\antigravity_auto_activator.py", "--daemon") `
+            -WorkingDirectory $ScriptDir `
+            -PassThru
+        if ($actP) { $actP.Id | Out-File -FilePath $ActivatorPidFile -Force -Encoding ascii }
+
+        # Start daemon
         $proc = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\daemon_service.py", "--daemon") `
             -WorkingDirectory $ScriptDir `
             -PassThru
         if ($proc) { $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii }
 
+        # Start widget
         $newW = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
             -WorkingDirectory $ScriptDir `
             -PassThru
         if ($newW) { $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii }
 
-        Write-Host "[OK] Daemon (PID: $($proc.Id)) y Widget (PID: $($newW.Id)) reiniciados exitosamente." -ForegroundColor Green
+        Write-Host "[OK] Auto-Activador, Daemon y Widget reiniciados exitosamente." -ForegroundColor Green
     }
 
     "hud" {
-        Write-Host "[*] Abriendo Antigravity Live HUD en navegador..." -ForegroundColor Cyan
         Start-Process "http://127.0.0.1:59123"
-        Write-Host "[OK] Panel abierto en http://127.0.0.1:59123" -ForegroundColor Green
     }
 
     "analytics" {
-        & python.exe "$ScriptDir\daemon_service.py" --analytics
+        & python.exe "$ScriptDir\analytics_engine.py"
     }
 
     "health" {
-        Write-Host "[*] Ejecutando auditoria de salud del Watchdog..." -ForegroundColor Cyan
-        & python.exe "$ScriptDir\daemon_service.py" --health
+        & python.exe "$ScriptDir\watchdog_service.py"
     }
 
     "notify-test" {
-        Write-Host "[*] Enviando notificacion Toast de prueba a Windows..." -ForegroundColor Cyan
-        & python.exe "$ScriptDir\daemon_service.py" --notify-test
+        & python.exe "$ScriptDir\notification_service.py"
     }
 
     "add" {
-        $email = $args[0]
-        $name = $args[1]
-        $tier = $args[2]
-        if (-not $email) {
-            & python.exe "$ScriptDir\config_manager.py" --interactive
+        $extraArgs = $args
+        if ($extraArgs.Count -ge 1) {
+            $email = $extraArgs[0]
+            $name = if ($extraArgs.Count -ge 2) { $extraArgs[1] } else { $email.Split('@')[0] }
+            $tier = if ($extraArgs.Count -ge 3) { $extraArgs[2] } else { "✦ Pro" }
+            & python.exe "$ScriptDir\config_manager.py" --add $email --name $name --tier $tier
         } else {
-            $cmdArgs = @("$ScriptDir\config_manager.py", "--add", $email)
-            if ($name) { $cmdArgs += @("--name", $name) }
-            if ($tier) { $cmdArgs += @("--tier", $tier) }
-            & python.exe @cmdArgs
+            & python.exe "$ScriptDir\config_manager.py" --interactive
         }
     }
 
@@ -215,12 +289,11 @@ switch ($Action.ToLower()) {
     }
 
     "remove" {
-        $email = $args[0]
-        if (-not $email) {
-            Write-Host "[!] Especifica el correo a eliminar: .\antigravity-monitor.ps1 remove usuario@gmail.com" -ForegroundColor Yellow
-        } else {
+        if ($args.Count -ge 1) {
+            $email = $args[0]
             & python.exe "$ScriptDir\config_manager.py" --remove $email
+        } else {
+            Write-Host "Uso: .\antigravity-monitor.ps1 remove <email>" -ForegroundColor Yellow
         }
     }
 }
-

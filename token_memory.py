@@ -465,7 +465,7 @@ def format_memory_status_table() -> str:
         st = get_effective_account_status(email)
         is_active = (st["email"].split("@")[0].lower() in active_email.lower())
         tag = "[ACTIVA]   " if is_active else "[EN ESPERA]"
-        lines.append(f" {tag} {email}  [👑 PRO]")
+        lines.append(f" {tag} {email}  [✦ PRO]")
         
         if st.get("last_updated") is None:
             lines.append("   - Gemini Models:      Sin registrar (se actualizara al rotar)")

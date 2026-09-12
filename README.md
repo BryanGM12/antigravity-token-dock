@@ -49,6 +49,10 @@ When building complex multi-agent architectures or running autonomous tasks in *
 
 ## ✦ Key Capabilities
 
+- **▪ Autonomous Auto-Activation System**:
+  - Automatically activates the Account Daemon and Docked Widget the instant **Google Antigravity IDE** is opened or active.
+  - Automatically puts services to sleep and cleans up memory when Antigravity is closed.
+  - Integrates permanently with Windows Task Scheduler (`AntigravityAutoActivator`) and WMI process creation events for zero-manual-effort workflow.
 - **▪ Zero-Lag Win32 Edge Docking**:
   - Hooks directly into Windows native `EVENT_OBJECT_LOCATIONCHANGE` with an adaptive 25ms/80ms heartbeat.
   - Automatically sticks to the right or left edge of Antigravity IDE during window move, resize, minimize, or maximize across multiple monitors.

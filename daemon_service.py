@@ -295,7 +295,7 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                         current_email = mem.get("active_account") or ""
                         pinned = get_pinned_account()
                         if pinned and pinned.split("@")[0].lower() in current_email.lower():
-                            logger.info(f"[CUENTA FIJADA 📌] {current_email} está fijada por el usuario. Omitiendo rotación automática.")
+                            logger.info(f"[CUENTA FIJADA ⚑] {current_email} está fijada por el usuario. Omitiendo rotación automática.")
                         else:
                             elapsed_since_switch = now - last_switch_time
                             if elapsed_since_switch < COOLDOWN_SECONDS:
@@ -385,7 +385,7 @@ def main():
         audit = run_health_audit()
         print(json.dumps(audit, indent=2, ensure_ascii=False))
     elif args.notify_test:
-        send_windows_toast("🚀 Antigravity Test", "Notificacion Toast de prueba enviada con exito.")
+        send_windows_toast("✦ Antigravity Test", "Notificacion Toast de prueba enviada con exito.")
         print("Notificacion enviada.")
     else:
         parser.print_help()

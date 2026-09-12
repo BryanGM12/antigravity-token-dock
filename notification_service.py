@@ -66,7 +66,7 @@ $notifier.Show($notification)
 
 def notify_rotation_success(prev_account: str, new_account: str, new_pct_5h: Optional[int] = None):
     """Notification when an account rotation completes successfully."""
-    title = "🔄 Antigravity: Rotación de Cuenta Exitosa"
+    title = "↻ Antigravity: Rotación de Cuenta Exitosa"
     msg = f"De: {prev_account.split('@')[0]}\nA: {new_account.split('@')[0]}"
     if new_pct_5h is not None:
         msg += f" (Cuota inicial 5h: {new_pct_5h}%)"
@@ -74,33 +74,33 @@ def notify_rotation_success(prev_account: str, new_account: str, new_pct_5h: Opt
 
 def notify_token_refresh(account: str, quota_type: str = "5 Horas"):
     """Notification when an idle account reaches 100% recharge."""
-    title = "⚡ Antigravity: Tokens Recargados"
+    title = "✦ Antigravity: Tokens Recargados"
     msg = f"La cuenta {account.split('@')[0]} ha completado su recarga de {quota_type} (100% disponible)."
     send_windows_toast(title, msg)
 
 def notify_dual_exhaustion_warning(minutes_to_recharge: int):
     """Critical warning when both accounts are exhausted and retention is engaged."""
-    title = "⚠️ Antigravity: Ambas Cuentas al Límite"
+    title = "[!] Antigravity: Ambas Cuentas al Límite"
     msg = f"Protocolo de retención activo. Próxima recarga estimada en {minutes_to_recharge} min."
     send_windows_toast(title, msg)
 
 def notify_preemptive_switch(current_account: str, next_account: str, current_pct: int):
     """Notification when proactive switch occurs before 0% crash."""
-    title = "⚡ Antigravity: Rotación Preventiva Inteligente"
+    title = "✦ Antigravity: Rotación Preventiva Inteligente"
     msg = f"Cuota baja ({current_pct}%). Rotando a {next_account.split('@')[0]} para evitar interrupciones."
     send_windows_toast(title, msg)
 
 def notify_auto_switch_toggled(enabled: bool):
     """Notification when user toggles auto-switch."""
     state = "ACTIVADA" if enabled else "PAUSADA"
-    title = f"🔄 Antigravity: Auto-Rotación {state}"
+    title = f"↻ Antigravity: Auto-Rotación {state}"
     msg = "El daemon cambiará automáticamente de cuenta al agotarse cuota." if enabled else "La cuenta actual se mantendrá fija hasta rotación manual."
     send_windows_toast(title, msg)
 
 if __name__ == "__main__":
     print("Enviando toast de prueba...")
     success = send_windows_toast(
-        "🚀 Antigravity Controller",
+        "✦ Antigravity Controller",
         "Sistema de Notificaciones Nativas Windows Activo y Verificado."
     )
     print("Resultado:", "ÉXITO" if success else "FALLO")
