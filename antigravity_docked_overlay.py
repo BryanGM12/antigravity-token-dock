@@ -970,6 +970,15 @@ class MinimalistPillHandle(QFrame):
         self.is_hovered = False
         self.pulse_val = 0.0
         self.dock_side = "left"
+        self.quota_pct = 100
+        self.active_email = ""
+
+    def set_quota_status(self, pct: Optional[int], email: str = ""):
+        val = 100 if pct is None else max(0, min(100, int(pct)))
+        if val != self.quota_pct or email != self.active_email:
+            self.quota_pct = val
+            self.active_email = email
+            self.update()
 
     def set_dock_side(self, side: str):
         if self.dock_side != side:
@@ -1041,15 +1050,42 @@ class MinimalistPillHandle(QFrame):
             path.closeSubpath()
         painter.drawPath(path)
 
-        # Gemini Star Icon ✦ (with subtle breathing glow)
-        glow_b = int(180 + 75 * self.pulse_val)
+        # Gemini Star Icon ✦ (with subtle breathing glow, color-coded by quota)
+        if self.quota_pct < 20:
+            pulse_a = int(170 + 85 * self.pulse_val)
+            star_color = QColor(239, 68, 68, pulse_a)  # Red warning pulse
+        elif self.quota_pct <= 50:
+            star_color = QColor(245, 158, 11, 230 if self.is_hovered else 190)  # Amber
+        else:
+            glow_b = int(180 + 75 * self.pulse_val)
+            star_color = QColor(59, 130, glow_b) if not self.is_hovered else QColor("#60a5fa")
+
         painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        painter.setPen(QColor(59, 130, glow_b) if not self.is_hovered else QColor("#60a5fa"))
+        painter.setPen(star_color)
         painter.drawText(QRect(0, 8, w, 20), Qt.AlignmentFlag.AlignCenter, "✦")
 
-        # Vertical Divider Micro Line
-        painter.setPen(QPen(QColor(59, 130, 246, 140 if self.is_hovered else 60), 1.5))
-        painter.drawLine(w // 2, 36, w // 2, h - 32)
+        # Vertical Quota Micro-Gauge (Live battery-style gauge)
+        track_x = w // 2
+        track_y1 = 36
+        track_y2 = h - 32
+        total_len = track_y2 - track_y1
+
+        # Background track line
+        painter.setPen(QPen(QColor(255, 255, 255, 25), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(track_x, track_y1, track_x, track_y2)
+
+        # Active fill line (drawn upwards from bottom track_y2)
+        fill_len = int(total_len * (self.quota_pct / 100.0))
+        if fill_len > 0:
+            if self.quota_pct > 50:
+                fill_color = QColor(59, 130, 246, 230 if self.is_hovered else 185)  # Antigravity Blue
+            elif self.quota_pct >= 20:
+                fill_color = QColor(245, 158, 11, 235 if self.is_hovered else 190)  # Amber
+            else:
+                fill_color = QColor(239, 68, 68, int(170 + 85 * self.pulse_val))   # Critical Red
+            
+            painter.setPen(QPen(fill_color, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(track_x, track_y2, track_x, track_y2 - fill_len)
 
         # Chevron Arrow › / ‹ (adapts to dock side)
         painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -1537,16 +1573,60 @@ class AntigravityDockedOverlay(QWidget):
         self.btn_refresh.setText(spinner_chars[self.sync_spin_step])
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
+        key = event.key()
+        # If search bar has focus, allow typing unless pressing Escape
+        if hasattr(self, "search_bar") and self.search_bar.isVisible() and self.search_bar.hasFocus() and key != Qt.Key.Key_Escape:
+            super().keyPressEvent(event)
+            return
+
+        if key == Qt.Key.Key_Escape:
             if self.is_expanded:
                 self.toggle_expanded()
                 event.accept()
                 return
+        elif self.is_expanded:
+            # 1, 2, 3, 4: Instant account switch
+            if key in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4):
+                idx = key - Qt.Key.Key_1
+                accounts = get_authorized_accounts()
+                if 0 <= idx < len(accounts):
+                    target = accounts[idx].get("email")
+                    if target:
+                        self.on_switch_account_requested(target)
+                        event.accept()
+                        return
+            elif key == Qt.Key.Key_R and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                if hasattr(self, "btn_refresh") and self.btn_refresh.isEnabled():
+                    self.on_manual_refresh()
+                    event.accept()
+                    return
+            elif key == Qt.Key.Key_A:
+                self.toggle_auto_switch()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_S:
+                self.toggle_sound()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_F and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                self.toggle_search()
+                event.accept()
+                return
+
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self.is_expanded or self.pill_handle.geometry().contains(event.pos()):
+            if not self.is_expanded:
+                self.toggle_expanded()
+                event.accept()
+                return
+            elif self.pill_handle.geometry().contains(event.pos()):
+                self.toggle_expanded()
+                event.accept()
+                return
+            elif not self.panel_container.geometry().contains(event.pos()):
+                # Smart backdrop click: clicked outside the panel container
                 self.toggle_expanded()
                 event.accept()
                 return

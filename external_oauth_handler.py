@@ -83,7 +83,14 @@ def send_single_key(hwnd: int, vk_code: int):
     time.sleep(0.06)
 
 def close_browser_tab(hwnd: int):
-    """Sends Ctrl+W to close current auth tab in browser."""
+    """Closes auth window/tab cleanly via WM_CLOSE with Ctrl+W fallback."""
+    try:
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        time.sleep(0.15)
+        if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
+            return
+    except Exception:
+        pass
     VK_CONTROL = 0x11
     VK_W = ord('W')
     send_key_combination(hwnd, VK_CONTROL, VK_W)
@@ -135,7 +142,13 @@ def find_browser_window() -> Optional[int]:
     return None
 
 def get_browser_url(hwnd: int) -> str:
-    """Reads current tab URL via Ctrl+L / Ctrl+C without breaking page focus."""
+    """Reads current tab URL via Ctrl+L / Ctrl+C without breaking page focus or erasing user clipboard."""
+    old_clip = None
+    try:
+        old_clip = pyperclip.paste()
+    except Exception:
+        pass
+        
     try:
         activate_browser_window(hwnd)
         pyperclip.copy("")
@@ -151,6 +164,12 @@ def get_browser_url(hwnd: int) -> str:
     except Exception as e:
         logger.debug(f"Failed to copy browser URL: {e}")
         return ""
+    finally:
+        if old_clip is not None:
+            try:
+                pyperclip.copy(old_clip)
+            except Exception:
+                pass
 
 def inject_url_in_browser(hwnd: int, new_url: str):
     """Navigates browser directly to new_url via address bar."""
@@ -231,10 +250,13 @@ def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     """
-    Backup physical click directly in the center of the Google Account card.
-    Google's account card is horizontally centered on all monitor resolutions.
+    Calibrated centered physical click on Google Account Chooser row.
+    Account cards are horizontally centered and vertically aligned around anchor 48% of window height.
     """
     switch_to_interactive_desktop()
+    activate_browser_window(hwnd)
+    time.sleep(0.1)
+    
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return False
@@ -244,22 +266,15 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     if win_w <= 0 or win_h <= 0:
         return False
         
-    # Card is horizontally centered
     cx = rect.left + (win_w // 2)
+    anchor_y = rect.top + int(win_h * 0.48)
+    row_offset = get_account_row_offset(target_email)
+    row_y = anchor_y + row_offset
     
-    # Calculate row vertical offset from tab index
-    tab_map = get_account_tab_map()
-    tab_count = tab_map.get(target_email.lower().strip(), 2)
-    row_idx = max(0, tab_count - 1)  # 0-indexed row
-    
-    # Estimated card row start position: ~32% from top of window or centered
-    card_start_y = rect.top + int(win_h * 0.32)
-    row_y = card_start_y + (row_idx * 60)
-    
-    logger.info(f"Executing backup centered physical click on account {target_email} at ({cx}, {row_y})...")
+    logger.info(f"Executing calibrated physical click on {target_email} at ({cx}, {row_y}) [offset: {row_offset}px]...")
     physical_click(cx, row_y)
-    time.sleep(0.2)
-    send_single_key(hwnd, 0x0D)  # Enter confirmation
+    time.sleep(0.15)
+    send_single_key(hwnd, 0x0D)  # VK_RETURN confirmation
     time.sleep(1.0)
     return True
 
@@ -267,8 +282,8 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
     """
     High-Reliability Google OAuth automation in external browser:
     1. Finds active browser window (strictly excluding Antigravity).
-    2. Detects OAuth page and injects login_hint={target_email} for instant 1-step sign-in.
-    3. If Account Chooser appears, executes deterministic keyboard Tab selection + centered click.
+    2. Detects Google Account Chooser screen and executes instant calibrated click.
+    3. Deterministic Tab fallback if click does not land.
     4. Handles permission/consent prompts ("Continuar" / "Permitir").
     5. Confirms success (antigravity.google/auth-success or window title) and closes tab.
     """
@@ -276,7 +291,6 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
     switch_to_interactive_desktop()
     start_time = time.time()
     
-    login_hint_injected = False
     selection_attempts = 0
     last_url_check = 0.0
     cached_url = ""
@@ -318,16 +332,6 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
                 logger.info("Closed authentication tab in browser.")
                 return True
                 
-            # Instant login_hint injection on Google OAuth pages
-            if "accounts.google.com" in cached_url and "login_hint=" not in cached_url and not login_hint_injected:
-                logger.info(f"Injecting login_hint={target_email} into address bar for direct account selection...")
-                sep = "&" if "?" in cached_url else "?"
-                target_url = f"{cached_url}{sep}login_hint={target_email}&Email={target_email}"
-                inject_url_in_browser(hwnd, target_url)
-                login_hint_injected = True
-                time.sleep(1.8)
-                continue
-                
         # 3. Handle Account Chooser screen
         is_chooser = (
             "accountchooser" in cached_url.lower() or
@@ -341,13 +345,13 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
             selection_attempts += 1
             logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/4)...")
             
-            # Primary strategy: Clean keyboard Tab navigation
-            select_account_via_tabs(hwnd, target_email)
-            time.sleep(1.5)
+            # Primary strategy: Instant calibrated centered click
+            select_account_via_centered_click(hwnd, target_email)
+            time.sleep(1.2)
             
-            # If still on chooser after attempt 2, execute centered click
+            # If still on chooser after attempt 1, fallback to deterministic Tab selection
             if selection_attempts >= 2:
-                select_account_via_centered_click(hwnd, target_email)
+                select_account_via_tabs(hwnd, target_email)
                 time.sleep(1.5)
             continue
             

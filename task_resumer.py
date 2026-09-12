@@ -10,24 +10,59 @@ from playwright.async_api import Page
 
 logger = logging.getLogger("TaskResumer")
 
+import urllib.parse
+
 async def navigate_to_conversation(page: Page, conv_id: str) -> bool:
-    """Navigates to the specified conversation by UUID or sidebar link."""
-    logger.info(f"Navigating to conversation {conv_id}...")
-    
-    # Try clicking the sidebar link first if visible
-    sidebar_link = page.locator(f'a[href*="{conv_id}"]')
-    if await sidebar_link.count() > 0 and await sidebar_link.first.is_visible():
-        await sidebar_link.first.click()
-        await asyncio.sleep(1.0)
+    """Navigates to the specified conversation by UUID or sidebar link without crashing on network errors."""
+    if not conv_id:
+        return False
+        
+    # If already on this conversation, no navigation needed
+    if conv_id in (page.url or ""):
+        logger.info(f"Already on conversation {conv_id}.")
         return True
         
-    # Otherwise navigate via URL directly
-    current_url = page.url
-    base_match = current_url.split("/c/")[0] if "/c/" in current_url else "https://127.0.0.1:59485"
-    target_url = f"{base_match}/c/{conv_id}"
-    await page.goto(target_url, wait_until="domcontentloaded")
-    await asyncio.sleep(1.5)
-    return True
+    logger.info(f"Navigating to conversation {conv_id}...")
+    
+    # 1. Preferred: Client-side React Router navigation (zero network reload, 0ms lag)
+    try:
+        clicked = await page.evaluate(f'''() => {{
+            const link = document.querySelector('a[href*="{conv_id}"]');
+            if (link) {{
+                link.click();
+                return true;
+            }}
+            return false;
+        }}''')
+        if clicked:
+            await asyncio.sleep(0.8)
+            return True
+    except Exception as e:
+        logger.debug(f"Client-side link click failed: {e}")
+
+    # 2. Try clicking locator with force=True
+    try:
+        sidebar_link = page.locator(f'a[href*="{conv_id}"]')
+        if await sidebar_link.count() > 0:
+            await sidebar_link.first.click(force=True, timeout=2000)
+            await asyncio.sleep(0.8)
+            return True
+    except Exception:
+        pass
+        
+    # 3. Dynamic URL navigation using ACTUAL host & port from current page.url
+    try:
+        current_url = page.url or ""
+        parsed = urllib.parse.urlparse(current_url)
+        if parsed.scheme and parsed.netloc and ":" in parsed.netloc:
+            target_url = f"{parsed.scheme}://{parsed.netloc}/c/{conv_id}"
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=6000)
+            await asyncio.sleep(1.0)
+            return True
+    except Exception as e:
+        logger.warning(f"Direct URL navigation to {conv_id} failed safely: {e}")
+        
+    return False
 
 async def find_and_trigger_resume_button(page: Page) -> bool:
     """Detects and clicks any explicit 'Continuar' or 'Resume' button in the chat stream."""
@@ -87,27 +122,31 @@ async def send_continue_message_input(page: Page, message: str = "continuar") ->
         
     return False
 
-async def resume_conversation_task(page: Page, conv_id: Optional[str] = None) -> bool:
+async def resume_conversation_task(page: Page, conv_id: Optional[str] = None, auto_prompt: bool = False) -> bool:
     """
     Main resumption pipeline:
     1. Navigates to conversation if ID provided.
-    2. Looks for explicit Resume / Continuar button.
-    3. If none found, enters 'continuar' into the message box.
+    2. Looks for explicit Resume / Continuar / Retry button in chat stream.
+    3. If none found and auto_prompt=True, enters 'continuar' into message box.
     """
     if conv_id:
-        await navigate_to_conversation(page, conv_id)
+        try:
+            await navigate_to_conversation(page, conv_id)
+        except Exception as e:
+            logger.warning(f"Failed to navigate to conversation {conv_id}: {e}")
         
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.8)
     
     # 1. Look for explicit button
     if await find_and_trigger_resume_button(page):
         logger.info("Successfully resumed task via resume button.")
         return True
         
-    # 2. Type 'continuar' into chat input
-    if await send_continue_message_input(page, "continuar"):
-        logger.info("Successfully sent 'continuar' in chat input.")
-        return True
-        
-    logger.warning("Could not find resume button or active message input to continue.")
-    return False
+    # 2. Only type 'continuar' if explicitly authorized (e.g. background crash recovery)
+    if auto_prompt:
+        if await send_continue_message_input(page, "continuar"):
+            logger.info("Successfully sent 'continuar' in chat input.")
+            return True
+            
+    logger.info("Conversation restored cleanly without injecting unwanted prompt.")
+    return True

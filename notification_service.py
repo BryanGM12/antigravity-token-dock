@@ -10,17 +10,11 @@ import logging
 import subprocess
 from typing import Optional
 
+import threading
+
 logger = logging.getLogger("NotificationService")
 
-def send_windows_toast(
-    title: str,
-    message: str,
-    app_id: str = "Antigravity Account Controller"
-) -> bool:
-    """
-    Sends a native Windows Toast notification via PowerShell WinRT APIs.
-    Runs completely silently in the background without stealing window focus.
-    """
+def _send_toast_worker(title: str, message: str, app_id: str):
     try:
         # Sanitize strings to avoid quote breakage
         safe_title = title.replace('"', '`"').replace("'", "''")
@@ -51,18 +45,37 @@ $notifier.Show($notification)
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=8,
             startupinfo=startupinfo
         )
         if res.returncode == 0:
             logger.info(f"Toast notification sent: '{title}' - '{message}'")
-            return True
         else:
             logger.warning(f"Toast notification failed: {res.stderr.strip()}")
-            return False
     except Exception as e:
         logger.warning(f"Error sending toast notification: {e}")
-        return False
+
+def send_windows_toast(
+    title: str,
+    message: str,
+    app_id: str = "Antigravity Account Controller",
+    sync: bool = False
+) -> bool:
+    """
+    Sends a native Windows Toast notification via PowerShell WinRT APIs.
+    Runs asynchronously in background thread to guarantee 0ms caller latency.
+    """
+    if sync:
+        _send_toast_worker(title, message, app_id)
+        return True
+    
+    thread = threading.Thread(
+        target=_send_toast_worker,
+        args=(title, message, app_id),
+        daemon=True
+    )
+    thread.start()
+    return True
 
 def notify_rotation_success(prev_account: str, new_account: str, new_pct_5h: Optional[int] = None):
     """Notification when an account rotation completes successfully."""

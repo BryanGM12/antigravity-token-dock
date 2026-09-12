@@ -95,6 +95,93 @@ from watchdog_service import (
 from local_hud import start_hud_in_background, HUD_PORT
 
 COOLDOWN_SECONDS = 300  # 5 minutes minimum between automatic switches to avoid thrashing
+LOCK_FILE = os.path.join(LOG_DIR, "rotation.lock")
+
+class RotationLock:
+    def __init__(self, owner: str = "switch"):
+        self.owner = owner
+        self.acquired = False
+
+    def acquire(self, timeout_sec: int = 15) -> bool:
+        start = time.time()
+        while time.time() - start < timeout_sec:
+            try:
+                if os.path.exists(LOCK_FILE):
+                    try:
+                        with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        lock_pid = data.get("pid")
+                        lock_time = data.get("time", 0)
+                        # Check if stale (> 90s) or process no longer exists
+                        if (time.time() - lock_time > 90) or (lock_pid and not psutil.pid_exists(lock_pid)):
+                            try:
+                                os.remove(LOCK_FILE)
+                            except Exception:
+                                pass
+                        else:
+                            time.sleep(0.5)
+                            continue
+                    except Exception:
+                        try:
+                            os.remove(LOCK_FILE)
+                        except Exception:
+                            pass
+                        
+                payload = {
+                    "owner": self.owner,
+                    "pid": os.getpid(),
+                    "time": time.time()
+                }
+                with open(LOCK_FILE, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                self.acquired = True
+                return True
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+    def release(self):
+        if os.path.exists(LOCK_FILE):
+            try:
+                with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("pid") == os.getpid():
+                    os.remove(LOCK_FILE)
+            except Exception:
+                pass
+        self.acquired = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+def is_rotation_locked() -> bool:
+    """Checks if another process currently holds the rotation lock."""
+    if not os.path.exists(LOCK_FILE):
+        return False
+    try:
+        with open(LOCK_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        lock_pid = data.get("pid")
+        lock_time = data.get("time", 0)
+        if time.time() - lock_time > 90:
+            try:
+                os.remove(LOCK_FILE)
+            except Exception:
+                pass
+            return False
+        if lock_pid and not psutil.pid_exists(lock_pid):
+            try:
+                os.remove(LOCK_FILE)
+            except Exception:
+                pass
+            return False
+        return lock_pid != os.getpid()
+    except Exception:
+        return False
 
 async def check_status_cli():
     """Takes a live quota sample (if Antigravity is active) and displays the memory status table."""
@@ -117,39 +204,48 @@ async def check_status_cli():
     print(format_memory_status_table())
 
 async def run_single_switch(target_email: Optional[str] = None):
-    """Executes a single immediate account switch and task resumption."""
+    """Executes a single immediate account switch and task resumption without duplicate prompts."""
     target_str = f" to {target_email}" if target_email else ""
     logger.info(f"Executing immediate manual account switch{target_str}...")
-    async with async_playwright() as p:
-        browser, page = await connect_antigravity(p)
-        ctx = browser.contexts[0]
+    
+    lock = RotationLock(owner=f"manual_switch_{target_email or 'auto'}")
+    if not lock.acquire(timeout_sec=12):
+        logger.warning("[LOCK] No se pudo adquirir el bloqueo de rotación. Hay otra operación en curso.")
+        return False
         
-        # Ensure dark theme is maintained
-        await ensure_dark_theme(page)
-        
-        # Save active conversation ID
-        conv_id = await get_active_conversation_id(page)
-        logger.info(f"Saved active conversation ID before switch: {conv_id}")
-        
-        # Perform rotation
-        success, prev, new_acc = await rotate_account(page, ctx, target_email=target_email)
-        if success:
-            logger.info(f"Account rotation successful: {prev} -> {new_acc}")
-            # Record analytics & send toast
-            record_rotation_event(prev, new_acc)
-            new_st = get_effective_account_status(new_acc)
-            record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
-            notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+    try:
+        async with async_playwright() as p:
+            browser, page = await connect_antigravity(p)
+            ctx = browser.contexts[0]
             
-            # Deep task resumption
-            if conv_id:
-                logger.info(f"Resuming conversation {conv_id}...")
-                await navigate_to_conversation(page, conv_id)
-                await resume_with_context(page)
-        else:
-            logger.error("Account rotation failed.")
+            # Ensure dark theme is maintained
+            await ensure_dark_theme(page)
             
-        await browser.close()
+            # Save active conversation ID
+            conv_id = await get_active_conversation_id(page)
+            logger.info(f"Saved active conversation ID before switch: {conv_id}")
+            
+            # Perform rotation (auto_prompt=False to preserve clean chat state on manual switch)
+            success, prev, new_acc = await rotate_account(page, ctx, target_email=target_email, auto_prompt=False)
+            if success:
+                logger.info(f"Account rotation successful: {prev} -> {new_acc}")
+                # Record analytics & send toast
+                record_rotation_event(prev, new_acc)
+                new_st = get_effective_account_status(new_acc)
+                record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
+                notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                
+                # Ensure conversation is navigated if needed
+                if conv_id:
+                    logger.info(f"Ensuring conversation {conv_id} is active...")
+                    await navigate_to_conversation(page, conv_id)
+            else:
+                logger.error("Account rotation failed.")
+                
+            await browser.close()
+            return success
+    finally:
+        lock.release()
 
 def is_antigravity_running() -> bool:
     """Checks if any Antigravity process is actively running."""
@@ -221,6 +317,12 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                 logger.info(f"[Watchdog] Cerradas {cleaned} pestana(s) huerfanas de Comet.")
         except Exception as e:
             logger.debug(f"[Watchdog] Error limpiando pestanas huerfanas: {e}")
+
+        # Check if another process holds rotation lock (e.g. manual switch from Dock overlay)
+        if is_rotation_locked():
+            logger.info("[LOCK] Rotacion manual en curso por otro proceso. Pausando sondeo CDP...")
+            await asyncio.sleep(poll_interval_sec)
+            continue
                 
         try:
             # 1. Fast check: language_server.log
@@ -322,28 +424,27 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                     conv_id = await get_active_conversation_id(page)
                                     logger.info(f"Guardando ID de conversacion activa: {conv_id}")
                                     
-                                    success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target)
-                                    if success:
-                                        last_switch_time = time.time()
-                                        logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
-                                        
-                                        # Analytics & Toast Notifications
-                                        record_rotation_event(prev, new_acc)
-                                        new_st = get_effective_account_status(new_acc)
-                                        record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
-                                        
-                                        if is_preemptive:
-                                            notify_preemptive_switch(prev, new_acc, crit_pct)
+                                    with RotationLock(owner="daemon_auto_rotation"):
+                                        success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True)
+                                        if success:
+                                            last_switch_time = time.time()
+                                            logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
+                                            
+                                            # Analytics & Toast Notifications
+                                            record_rotation_event(prev, new_acc)
+                                            new_st = get_effective_account_status(new_acc)
+                                            record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
+                                            
+                                            if is_preemptive:
+                                                notify_preemptive_switch(prev, new_acc, crit_pct)
+                                            else:
+                                                notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                                                
+                                            if conv_id:
+                                                logger.info(f"Verificando conversacion {conv_id} activa...")
+                                                await navigate_to_conversation(page, conv_id)
                                         else:
-                                            notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
-                                        
-                                        if conv_id:
-                                            logger.info(f"Reanudando tareas profundas en conversacion {conv_id}...")
-                                            await asyncio.sleep(2.0)
-                                            await navigate_to_conversation(page, conv_id)
-                                            await resume_with_context(page)
-                                    else:
-                                        logger.error("Fallo la rotacion automatica de cuenta.")
+                                            logger.error("Fallo la rotacion automatica de cuenta.")
                                 
                 await browser.close()
         except Exception as e:

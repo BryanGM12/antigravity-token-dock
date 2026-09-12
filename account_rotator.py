@@ -186,7 +186,7 @@ async def is_authenticated_in_dom(page: Page) -> bool:
     except Exception:
         return False
 
-async def rotate_account(page: Page, context: Optional[BrowserContext] = None, target_email: Optional[str] = None) -> Tuple[bool, str, str]:
+async def rotate_account(page: Page, context: Optional[BrowserContext] = None, target_email: Optional[str] = None, auto_prompt: bool = False) -> Tuple[bool, str, str]:
     """
     Full rotation pipeline:
     1. Detects current active email and captures active conversation ID.
@@ -194,10 +194,10 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     3. Determines next target email (or uses explicitly specified target_email).
     4. Clicks Sign Out.
     5. Clicks Sign In / Continue with Google.
-    6. Completes Google OAuth in Comet with visual anchor selection and closes Comet tab.
+    6. Completes Google OAuth in Comet with calibrated row selection and closes Comet tab.
     7. Verifies new logged in email in Antigravity.
     8. Updates token memory with new account quota.
-    9. Resumes active task in Antigravity chat ("continuar").
+    9. Restores active conversation without intrusive prompts unless auto_prompt=True.
     """
     logger.info("Starting automated account rotation...")
     
@@ -288,8 +288,8 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         
     # 9. Resume paused task in active conversation
     try:
-        logger.info("Resuming active conversation task...")
-        await resume_conversation_task(page, active_conv_id)
+        logger.info(f"Resuming active conversation task (auto_prompt={auto_prompt})...")
+        await resume_conversation_task(page, active_conv_id, auto_prompt=auto_prompt)
     except Exception as e:
         logger.warning(f"Failed to resume task after rotation: {e}")
         

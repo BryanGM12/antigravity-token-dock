@@ -93,32 +93,10 @@ def cleanup_orphan_comet_auth_tabs() -> int:
     for hwnd in matching_hwnds:
         try:
             logger.info(f"Closing leftover Comet auth window: HWND {hwnd}...")
-            # Bring to front and send Ctrl+W
-            cur_thread = kernel32.GetCurrentThreadId()
-            fg_hwnd = user32.GetForegroundWindow()
-            fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None)
-            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-            
-            user32.AttachThreadInput(cur_thread, fg_thread, True)
-            user32.AttachThreadInput(cur_thread, target_thread, True)
-            user32.AllowSetForegroundWindow(-1)
-            user32.ShowWindow(hwnd, 9)
-            user32.SetForegroundWindow(hwnd)
-            user32.BringWindowToTop(hwnd)
-            user32.AttachThreadInput(cur_thread, fg_thread, False)
-            user32.AttachThreadInput(cur_thread, target_thread, False)
-            
-            time.sleep(0.1)
-            VK_CONTROL = 0x11
-            VK_W = ord('W')
-            KEYEVENTF_KEYUP = 0x0002
-            user32.keybd_event(VK_CONTROL, 0, 0, 0)
-            user32.keybd_event(VK_W, 0, 0, 0)
-            time.sleep(0.05)
-            user32.keybd_event(VK_W, 0, KEYEVENTF_KEYUP, 0)
-            user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+            # Post WM_CLOSE directly to close window cleanly in background without focus stealing
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)
             closed_count += 1
-            time.sleep(0.3)
+            time.sleep(0.1)
         except Exception as e:
             logger.warning(f"Error closing orphan tab {hwnd}: {e}")
             
