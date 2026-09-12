@@ -84,6 +84,19 @@ def notify_dual_exhaustion_warning(minutes_to_recharge: int):
     msg = f"Protocolo de retención activo. Próxima recarga estimada en {minutes_to_recharge} min."
     send_windows_toast(title, msg)
 
+def notify_preemptive_switch(current_account: str, next_account: str, current_pct: int):
+    """Notification when proactive switch occurs before 0% crash."""
+    title = "⚡ Antigravity: Rotación Preventiva Inteligente"
+    msg = f"Cuota baja ({current_pct}%). Rotando a {next_account.split('@')[0]} para evitar interrupciones."
+    send_windows_toast(title, msg)
+
+def notify_auto_switch_toggled(enabled: bool):
+    """Notification when user toggles auto-switch."""
+    state = "ACTIVADA" if enabled else "PAUSADA"
+    title = f"🔄 Antigravity: Auto-Rotación {state}"
+    msg = "El daemon cambiará automáticamente de cuenta al agotarse cuota." if enabled else "La cuenta actual se mantendrá fija hasta rotación manual."
+    send_windows_toast(title, msg)
+
 if __name__ == "__main__":
     print("Enviando toast de prueba...")
     success = send_windows_toast(

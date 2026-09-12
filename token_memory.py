@@ -108,11 +108,20 @@ def load_memory() -> Dict[str, Any]:
         data = {
             "updated_at": None,
             "active_account": None,
+            "auto_switch_enabled": True,
+            "pinned_account": None,
+            "sound_enabled": True,
             "accounts": {}
         }
         
     if "accounts" not in data:
         data["accounts"] = {}
+    if "auto_switch_enabled" not in data:
+        data["auto_switch_enabled"] = True
+    if "pinned_account" not in data:
+        data["pinned_account"] = None
+    if "sound_enabled" not in data:
+        data["sound_enabled"] = True
         
     # Ensure all 3 default accounts exist
     for acc in DEFAULT_ACCOUNTS:
@@ -520,3 +529,66 @@ def format_memory_status_table() -> str:
     lines.append("================================================================================")
     
     return "\n".join(lines)
+
+# =============================================================================
+# Control Functions: Auto-Switch, Pinning, Sound & Recharge Watcher
+# =============================================================================
+
+def is_auto_switch_enabled() -> bool:
+    mem = load_memory()
+    return bool(mem.get("auto_switch_enabled", True))
+
+def set_auto_switch_enabled(enabled: bool) -> bool:
+    mem = load_memory()
+    mem["auto_switch_enabled"] = bool(enabled)
+    save_memory(mem)
+    return bool(enabled)
+
+def get_pinned_account() -> Optional[str]:
+    mem = load_memory()
+    return mem.get("pinned_account")
+
+def set_pinned_account(email: Optional[str]) -> Optional[str]:
+    mem = load_memory()
+    mem["pinned_account"] = email.strip().lower() if email else None
+    save_memory(mem)
+    return mem["pinned_account"]
+
+def is_sound_enabled() -> bool:
+    mem = load_memory()
+    return bool(mem.get("sound_enabled", True))
+
+def set_sound_enabled(enabled: bool) -> bool:
+    mem = load_memory()
+    mem["sound_enabled"] = bool(enabled)
+    save_memory(mem)
+    return bool(enabled)
+
+def check_recharge_notifications() -> List[str]:
+    """
+    Checks if any previously exhausted accounts have finished their 5h countdown.
+    Marks them as recharged and returns the list of newly recharged emails.
+    """
+    mem = load_memory()
+    recharged = []
+    now = datetime.now()
+    updated = False
+    
+    for email, acc in mem.get("accounts", {}).items():
+        if acc.get("is_exhausted"):
+            eta_str = acc.get("five_hour_refresh_eta")
+            if eta_str:
+                try:
+                    eta_dt = datetime.fromisoformat(eta_str)
+                    if now >= eta_dt:
+                        acc["is_exhausted"] = False
+                        gem = acc.setdefault("gemini", {})
+                        gem["five_hour_remaining_pct"] = 100
+                        gem["five_hour_refresh_text"] = "Recargado (100%)"
+                        recharged.append(email)
+                        updated = True
+                except Exception:
+                    pass
+    if updated:
+        save_memory(mem)
+    return recharged

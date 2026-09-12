@@ -46,6 +46,7 @@ token_memory.json
 *.jpg
 *.jpeg
 *.webp
+!docs/assets/**
 account_dialog.html
 tmp_hist.db
 

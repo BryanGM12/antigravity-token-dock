@@ -1,48 +1,104 @@
 <div align="center">
 
-# ✦ Antigravity Token Dock & Multi-Account Controller
+<img src="docs/assets/dock_hero_banner.png" alt="Antigravity Token Dock Hero Banner" width="100%" />
 
-**The native docked overlay and autonomous account rotator for Google Antigravity IDE.**
+# ✦ Antigravity Token Dock & Autonomous Account Switcher
+
+**The native docked overlay and continuous quota manager for Google Antigravity IDE.**
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6.svg?logo=windows&logoColor=white)](https://microsoft.com)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![UI Framework](https://img.shields.io/badge/GUI-PyQt6%20%7C%20Win32-41CD52.svg?logo=qt&logoColor=white)](https://riverbankcomputing.com/software/pyqt/)
+[![Design](https://img.shields.io/badge/Design-Deep%20Obsidian%20Matte-101010.svg?logo=google&logoColor=3b82f6)](#-native-antigravity-design-system)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Theme](https://img.shields.io/badge/Design-Deep%20Obsidian%20Minimalist-528bff.svg)](#design--interface)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/BryanGM12/antigravity-token-dock/pulls)
+
+[English](#-overview) • [Español](#-descripción-en-español) • [Quick Start](#-quick-start) • [Visual Showcase](#-visual-showcase) • [Key Features](#-key-capabilities)
 
 </div>
 
 ---
 
-## 🌟 Overview
+## ✦ Overview
 
-**Antigravity Token Dock** is an ultra-lightweight, hardware-accelerated desktop companion designed exclusively for **Google Antigravity IDE**.
+When building complex multi-agent architectures or running autonomous tasks in **Google Antigravity IDE**, hitting 5-hour or weekly model quota limits breaks your development flow.
 
-When developing complex multi-agent workflows, codebases, or executing `/goal` tasks, model quota exhaustion (5-hour and weekly caps) disrupts the development lifecycle. **Antigravity Token Dock** eliminates manual switching by docking directly to the Antigravity window, tracking quotas across multiple Google AI accounts in real time, and enabling seamless 1-click or automated background rotation with zero interruption to your active task.
-
----
-
-## ⚡ Key Capabilities
-
-- **📍 Magnetic Zero-Lag Window Docking**: Hooks directly into the native Windows Win32 event subsystem (`EVENT_OBJECT_LOCATIONCHANGE`) with an adaptive 25ms heartbeat and hardware `SetWindowPos` repositioning. Tracks moves, resizes, minimizations, and multi-monitor setups without CPU overhead.
-- **✨ Intelligent Auto-Sorting**:
-  - **Active Account (Top)**: The account currently logged in is pinned at the very top with an animated emerald heartbeat pulse.
-  - **Available Accounts (Middle)**: Standby accounts with active token reserves ranked by remaining quotas.
-  - **Exhausted Accounts (Bottom)**: Accounts that have hit quota limits are automatically moved to the bottom with live recharge countdowns and reset clocks.
-- **🎨 Antigravity Minimalist Aesthetic**:
-  - Signature Google AI gradient accent line (`#528bff` ➔ `#818cf8` ➔ `#c084fc` ➔ `#f472b6`).
-  - Deep Obsidian palette (`#14161b` / `#181b22`) blending seamlessly into the IDE.
-  - Hairline 4px progress bars, micro badges, and live model chips.
-  - Fluid 220ms slide-in / slide-out animations powered by `QVariantAnimation` with `OutCubic` easing.
-- **🔄 Automated OAuth & Session Resumption**:
-  - Full automation: Signs out of Antigravity ➔ Selects account via visual computer vision and keyboard navigation in the browser ➔ Confirms session ➔ Automatically injects a resumption prompt into the active chat so work continues uninterrupted.
-- **🔒 100% Local Privacy & Security**:
-  - Zero cloud relay. All configuration stays on your local machine (`accounts_config.json` is strictly ignored by Git).
-  - Works with any number of Google AI Pro or standard accounts.
+**Antigravity Token Dock** is an ultra-lightweight, hardware-accelerated desktop companion that docks directly to the side of your Antigravity window. It tracks token quotas across multiple accounts in real time, organizes them intelligently, and provides seamless 1-click or fully automated background rotation so you never run out of tokens again.
 
 ---
 
-## 🖥 Architecture
+## ✦ Visual Showcase
+
+<div align="center">
+
+| ✦ Expanded Token Hub (Live Quotas & Resets) | ✦ Right-Click Quick Actions Menu |
+| :---: | :---: |
+| <img src="docs/assets/dock_preview_expanded.png" width="380" alt="Expanded Token Hub" /> | <img src="docs/assets/dock_preview_context_menu.png" width="380" alt="Right-Click Menu" /> |
+| *Live auto-sorted accounts, exact reset days, and progress bars.* | *Right-click anywhere to close panel, toggle auto-rotation, sound, or startup.* |
+
+<br/>
+
+### ✦ Seamless Docked Edge Pill
+<img src="docs/assets/dock_preview_collapsed.png" width="460" alt="Docked Pill Handle" />
+
+*Unobtrusive 28px pill docks to the edge of Antigravity IDE. Click to expand; click again or outside to collapse.*
+
+</div>
+
+---
+
+## ✦ Key Capabilities
+
+- **▪ Zero-Lag Win32 Edge Docking**:
+  - Hooks directly into Windows native `EVENT_OBJECT_LOCATIONCHANGE` with an adaptive 25ms/80ms heartbeat.
+  - Automatically sticks to the right or left edge of Antigravity IDE during window move, resize, minimize, or maximize across multiple monitors.
+- **▪ Stutter-Free 60 FPS Fluid Animations**:
+  - Hardware-optimized `QVariantAnimation` with `OutCubic` easing.
+  - Pre-allocated transparent canvas avoids Windows DWM reallocation hitches for instant, silky-smooth slide transitions.
+- **▪ Intelligent Auto-Sorting**:
+  - **Active Account (Top)**: Pinned at the very top with glowing active session border and emerald heartbeat indicator (`● ACTIVA`).
+  - **Available Accounts (Middle)**: Ready-to-use standby accounts ranked by available quota.
+  - **Exhausted Accounts (Bottom)**: Automatically moved to the bottom with live recharge countdowns (`✕ AGOTADA`).
+- **▪ Exact Reset Day & Countdown Clocks**:
+  - Displays the exact day of the week and clock time of quota resets (e.g., `Mañana 04:19 (en 4h 22m)`, `Viernes 15:59 (en 6d 16h)`).
+  - Prominent reset banner at the top of each card keeps you informed at a glance (`✦ Restablece:`).
+- **▪ Right-Click Context Menu**:
+  - Right-click anywhere on the pill or dock to instantly open quick actions:
+    - `✕ Cerrar menú (Ocultar panel)`
+    - `⇄ Rotar a la siguiente cuenta`
+    - `↻ Actualizar tokens en vivo`
+    - `✓ ✦ Auto-rotación activa`
+    - `✓ ♪ Efectos de sonido`
+    - `✦ Iniciar con Windows`
+    - `✦ Abrir Web HUD`
+    - `✦ Exportar copia de respaldo`
+    - `✕ Cerrar y salir de la app`
+- **▪ Account Pinning**:
+  - Click the pin icon (`⚑`) on any account to freeze auto-rotation on that specific account when needed.
+- **▪ Authentic Deep Obsidian Aesthetic**:
+  - Pixel-sampled directly from Google Antigravity IDE: `#101010` container, `#161616` cards, `#242424` hairline borders, and Google AI spectrum gradient (`#3b82f6` ➔ `#6366f1` ➔ `#a855f7` ➔ `#ec4899`).
+- **▪ Autonomous Background Daemon**:
+  - Background daemon monitors quota exhaustion.
+  - Automatically switches accounts and injects a resumption prompt into the active chat so long-running tasks continue seamlessly.
+- **▪ 100% Local Privacy & Security**:
+  - Zero cloud telemetry or external relays. All configuration stays strictly on your local computer (`accounts_config.json` is git-ignored).
+
+---
+
+## ✦ Descripción en Español
+
+**Antigravity Token Dock** es un widget de escritorio nativo para Windows diseñado para eliminar los límites de cuota de tokens en **Google Antigravity IDE**.
+
+- Se acopla magnéticamente al borde de la ventana de Antigravity sin latencia (Win32 Hook).
+- Ordena automáticamente tus cuentas: la cuenta activa siempre arriba, y las que se quedan sin cuota se mueven al fondo.
+- Muestra el día exacto de restablecimiento (`Mañana 04:19`, `Viernes 15:59`, etc.).
+- Permite rotar cuentas con 1 clic o de forma 100% automática en segundo plano.
+- Menú contextual con clic derecho para cerrar el panel, alternar auto-rotación, sonido o inicio con Windows.
+- Interfaz moderna obsidian idéntica a Antigravity IDE con animaciones fluidas a 60 FPS.
+
+---
+
+## ✦ Architecture
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
@@ -54,11 +110,12 @@ When developing complex multi-agent workflows, codebases, or executing `/goal` t
          (Location Change) │  (authService / state)
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│              ✦ Antigravity Token Dock Widget              │
+│              ✦ Antigravity Token Dock Widget             │
 │       - 28px Slim Edge Pill Handle                       │
-│       - 360px Minimalist Flyout Panel                    │
+│       - 410px Minimalist Flyout Panel                    │
 │       - Dynamic Sorting (Active Top ➔ Exhausted Bottom)  │
-│       - Pulsing Live Health Heartbeat                    │
+│       - Exact Reset Day Banner & Countdown Clocks        │
+│       - Right-Click Context Menu Actions                 │
 └──────────────────────────┬───────────────────────────────┘
                            │
              1-Click Switch│ Auto-Rotation Trigger
@@ -66,7 +123,7 @@ When developing complex multi-agent workflows, codebases, or executing `/goal` t
 ┌──────────────────────────────────────────────────────────┐
 │             Autonomous Background Daemon & Rotator       │
 │       - Quota Detector (CDP Inspector)                   │
-│       - External Browser OAuth Handler (Vision + Win32)   │
+│       - External Browser OAuth Handler (Vision + Win32)  │
 │       - Task Resumer (Restores Active Conversation)      │
 │       - SQLite / JSON Persistent State Memory            │
 └──────────────────────────────────────────────────────────┘
@@ -74,23 +131,17 @@ When developing complex multi-agent workflows, codebases, or executing `/goal` t
 
 ---
 
-## 🚀 Quick Start
+## ✦ Quick Start
 
-### 1. Requirements
+### 1. Prerequisites
 - Windows 10 or Windows 11 (64-bit)
 - Python 3.10+
 - Google Antigravity IDE
 
-### 2. Installation
-
-Clone this repository:
+### 2. Clone & Install
 ```bash
 git clone https://github.com/BryanGM12/antigravity-token-dock.git
 cd antigravity-token-dock
-```
-
-Install the dependencies:
-```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
@@ -102,21 +153,21 @@ Copy the configuration template:
 cp accounts_config.example.json accounts_config.json
 ```
 
-Edit `accounts_config.json` with your own accounts:
+Edit `accounts_config.json` with your Google accounts:
 ```json
 {
   "accounts": [
     {
-      "email": "primary.pro@gmail.com",
-      "name": "Primary Account",
-      "tier": "👑 Pro",
+      "email": "primary.developer@gmail.com",
+      "name": "Cuenta Principal",
+      "tier": "✦ Pro",
       "tab_index": 1,
       "row_offset": 0
     },
     {
-      "email": "backup.pro@gmail.com",
-      "name": "Backup Account",
-      "tier": "👑 Pro",
+      "email": "secondary.backup@gmail.com",
+      "name": "Cuenta Respaldo",
+      "tier": "✦ Pro",
       "tab_index": 2,
       "row_offset": 61
     }
@@ -129,52 +180,54 @@ Edit `accounts_config.json` with your own accounts:
 ```
 
 > [!NOTE]
-> `accounts_config.json` is included in `.gitignore` to guarantee your credentials and email addresses are never pushed to any remote repository.
+> `accounts_config.json` is protected by `.gitignore` so your private email addresses and tokens are never committed or pushed to GitHub.
 
 ---
 
-## ➕ Adding & Managing Accounts
+## ✦ Adding Accounts
 
-Antigravity Token Dock supports 4 effortless methods to configure your accounts:
+You can add accounts through any of these 4 methods:
 
-### Method 1: Directly from the Docked Overlay (GUI)
-Click the **`+`** button in the header bar of the expanded overlay panel. A minimalist dialog will prompt you for the Google email, display name, and Pro tier option. The account is added immediately and the widget updates in real time.
+### Method 1: Directly in the Dock GUI
+Click the **`+`** icon in the header bar of the expanded dock. A sleek dialog will appear to input email and Pro tier.
 
-### Method 2: Interactive Console Wizard
-Run the built-in step-by-step CLI wizard:
+### Method 2: One-Line PowerShell Command
 ```powershell
-python config_manager.py --interactive
-# or via PowerShell:
+.\antigravity-monitor.ps1 add new.developer@gmail.com "Cuenta 3" "✦ Pro"
+```
+
+### Method 3: Interactive CLI Wizard
+```powershell
 .\antigravity-monitor.ps1 add
+# or
+python config_manager.py --interactive
 ```
 
-### Method 3: One-Line PowerShell / Terminal Commands
+### Method 4: List / Remove Accounts
 ```powershell
-# Add account with display name and Pro tier
-.\antigravity-monitor.ps1 add new.account@gmail.com "Cuenta 5" "👑 Pro"
-
-# List all configured accounts
 .\antigravity-monitor.ps1 list
-
-# Remove an account
-.\antigravity-monitor.ps1 remove old.account@gmail.com
+.\antigravity-monitor.ps1 remove old.developer@gmail.com
 ```
-
-### Method 4: Edit `accounts_config.json`
-Directly modify the JSON file to define custom tab indexes, nicknames, and offsets.
 
 ---
 
-## 💻 Usage
+## ✦ Controls & Hotkeys
 
-### Run the Docked Widget
-```powershell
-python antigravity_docked_overlay.py
-```
-A sleek minimalist pill tab `✦` will attach itself to the right edge of your Antigravity window. Click it to expand the full dashboard; click again or outside to collapse it.
+| Action | Shortcut / Trigger |
+| :--- | :--- |
+| **Toggle Expand / Collapse** | Click the edge pill tab `✦` |
+| **Close Menu / Hide Panel** | Click anywhere outside OR right-click ➔ `✕ Cerrar menú` |
+| **Quick Actions Menu** | Right-click on pill button or panel |
+| **Pin Account** | Click the `⚑` icon on any card |
+| **Manual Rotate** | Click `⇄ Cambiar a esta cuenta` on any card |
+| **Live Refresh** | Click `↻` or right-click ➔ `↻ Actualizar tokens en vivo` |
 
-### Monitor & Control via PowerShell
-Use the included controller script to manage background processes:
+---
+
+## ✦ Service Management
+
+Use the PowerShell supervisor to manage the background services:
+
 ```powershell
 # Check live status across all accounts
 .\antigravity-monitor.ps1 status
@@ -185,34 +238,30 @@ Use the included controller script to manage background processes:
 # Restart all services
 .\antigravity-monitor.ps1 restart
 
-# Stop services
+# Stop all background services
 .\antigravity-monitor.ps1 stop
 ```
 
-### CLI Command Options
-```bash
-# Display live token status table in terminal
-python daemon_service.py --status
+---
 
-# Switch to the next optimal account automatically
-python daemon_service.py --switch-now
+## ✦ Contributing
 
-# Switch to a specific account
-python daemon_service.py --switch-to user@example.com
+Contributions are welcome! If you have ideas for new features, bug fixes, or visual improvements:
 
-# Start continuous daemon loop
-python daemon_service.py --daemon
-```
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ---
 
-## 🛡 Security & Privacy
+## ✦ Support the Project
 
-- **Local Execution**: All processes run strictly as local user-space scripts. No external servers, analytics, or telemetry are used.
-- **Git Hygiene**: Sensitive config files (`accounts_config.json`), token databases, screenshots, and logs are automatically excluded by `.gitignore`.
+If Antigravity Token Dock saves you time and keeps your coding workflow uninterrupted, please consider starring the repository on GitHub!
 
 ---
 
-## 📄 License
+## ✦ License
 
-This project is licensed under the [MIT License](LICENSE).
+Distributed under the MIT License. See [LICENSE](LICENSE) for details.

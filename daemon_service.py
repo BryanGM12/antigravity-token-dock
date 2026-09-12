@@ -67,7 +67,10 @@ from token_memory import (
     format_memory_status_table,
     evaluate_switch_readiness,
     get_effective_account_status,
-    load_memory
+    load_memory,
+    is_auto_switch_enabled,
+    get_pinned_account,
+    check_recharge_notifications
 )
 
 # New Subsystems
@@ -75,7 +78,8 @@ from notification_service import (
     send_windows_toast,
     notify_rotation_success,
     notify_token_refresh,
-    notify_dual_exhaustion_warning
+    notify_dual_exhaustion_warning,
+    notify_preemptive_switch
 )
 from analytics_engine import (
     record_usage_sample,
@@ -250,7 +254,17 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                 is_exhausted = log_exhausted or chat_exhausted
                 reason = chat_reason if chat_exhausted else (log_reason if log_exhausted else "")
                 
-                # If neither log nor chat flagged an error, check memory for 0%
+                # 3. Check for newly recharged accounts to send instant toast notifications
+                recharged_accounts = check_recharge_notifications()
+                for rec_acc in recharged_accounts:
+                    logger.info(f"[RECARGA COMPLETA] {rec_acc} ha alcanzado el 100% de cuota. Notificando...")
+                    notify_token_refresh(rec_acc, "5 Horas")
+
+                # 4. Quota exhaustion and pre-emptive rotation evaluation
+                is_preemptive = False
+                crit_pct = 0
+                PREEMPTIVE_THRESHOLD = 5  # Safe buffer: rotate before in-flight prompt crashes
+
                 if not is_exhausted:
                     mem = load_memory()
                     active_acc = mem.get("active_account")
@@ -261,53 +275,75 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                         if (p_5h is not None and p_5h <= 0) or (p_wk is not None and p_wk <= 0):
                             is_exhausted = True
                             reason = f"Cuota de cuenta activa en 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
+                        elif (p_5h is not None and p_5h <= PREEMPTIVE_THRESHOLD) or (p_wk is not None and p_wk <= PREEMPTIVE_THRESHOLD):
+                            # Only trigger pre-emptive if another account is ready
+                            val_list = [p for p in [p_5h, p_wk] if p is not None]
+                            crit_pct = min(val_list) if val_list else 0
+                            can_sw, _, _, tgt = evaluate_switch_readiness(active_acc)
+                            if can_sw and tgt:
+                                is_exhausted = True
+                                is_preemptive = True
+                                reason = f"Rotación preventiva inteligente (cuota crítica: {crit_pct}% <= {PREEMPTIVE_THRESHOLD}%)"
                             
                 if is_exhausted:
-                    elapsed_since_switch = now - last_switch_time
-                    if elapsed_since_switch < COOLDOWN_SECONDS:
-                        logger.warning(
-                            f"Tokens agotados ({reason}), pero en periodo de cooldown ({int(COOLDOWN_SECONDS - elapsed_since_switch)}s restantes). Esperando..."
-                        )
+                    # Check if user paused auto-switch
+                    if not is_auto_switch_enabled():
+                        logger.info(f"[AUTO-SWITCH PAUSADO] Cuota al límite ({reason}), pero auto-rotación está pausada por el usuario.")
                     else:
+                        # Check if current account is pinned
                         mem = load_memory()
-                        current_email = mem.get("active_account")
-                        if not current_email:
-                            current_email = await get_current_logged_in_email(page, close_after=True)
-                            
-                        can_switch, switch_reason, wait_sec, best_target = evaluate_switch_readiness(current_email)
-                        
-                        if not can_switch:
-                            logger.warning(
-                                f"[RETENCION] {switch_reason} Todas las cuentas estan agotadas o no listas. El daemon retendra la alternancia para evitar bucles."
-                            )
-                            if (now - last_retention_notify_time) > 900:  # At most once per 15 min
-                                notify_dual_exhaustion_warning(max(1, int((wait_sec or 300) // 60)))
-                                last_retention_notify_time = now
+                        current_email = mem.get("active_account") or ""
+                        pinned = get_pinned_account()
+                        if pinned and pinned.split("@")[0].lower() in current_email.lower():
+                            logger.info(f"[CUENTA FIJADA 📌] {current_email} está fijada por el usuario. Omitiendo rotación automática.")
                         else:
-                            logger.warning(f"[ALERTA] AGOTAMIENTO DE TOKENS DETECTADO: {reason}")
-                            logger.info(f"Autorizando alternancia: {switch_reason} (Destino: {best_target})")
-                            
-                            conv_id = await get_active_conversation_id(page)
-                            logger.info(f"Guardando ID de conversacion activa: {conv_id}")
-                            
-                            success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target)
-                            if success:
-                                last_switch_time = time.time()
-                                logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
-                                
-                                # Analytics & Toast Notifications
-                                record_rotation_event(prev, new_acc)
-                                new_st = get_effective_account_status(new_acc)
-                                record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
-                                notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
-                                
-                                if conv_id:
-                                    logger.info(f"Reanudando tareas profundas en conversacion {conv_id}...")
-                                    await asyncio.sleep(2.0)
-                                    await navigate_to_conversation(page, conv_id)
-                                    await resume_with_context(page)
+                            elapsed_since_switch = now - last_switch_time
+                            if elapsed_since_switch < COOLDOWN_SECONDS:
+                                logger.warning(
+                                    f"Tokens agotados ({reason}), pero en periodo de cooldown ({int(COOLDOWN_SECONDS - elapsed_since_switch)}s restantes). Esperando..."
+                                )
                             else:
-                                logger.error("Fallo la rotacion automatica de cuenta.")
+                                if not current_email:
+                                    current_email = await get_current_logged_in_email(page, close_after=True)
+                                    
+                                can_switch, switch_reason, wait_sec, best_target = evaluate_switch_readiness(current_email)
+                                
+                                if not can_switch:
+                                    logger.warning(
+                                        f"[RETENCION] {switch_reason} Todas las cuentas estan agotadas o no listas. El daemon retendra la alternancia para evitar bucles."
+                                    )
+                                    if (now - last_retention_notify_time) > 900:  # At most once per 15 min
+                                        notify_dual_exhaustion_warning(max(1, int((wait_sec or 300) // 60)))
+                                        last_retention_notify_time = now
+                                else:
+                                    logger.warning(f"[ALERTA] AGOTAMIENTO DE TOKENS DETECTADO: {reason}")
+                                    logger.info(f"Autorizando alternancia: {switch_reason} (Destino: {best_target})")
+                                    
+                                    conv_id = await get_active_conversation_id(page)
+                                    logger.info(f"Guardando ID de conversacion activa: {conv_id}")
+                                    
+                                    success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target)
+                                    if success:
+                                        last_switch_time = time.time()
+                                        logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
+                                        
+                                        # Analytics & Toast Notifications
+                                        record_rotation_event(prev, new_acc)
+                                        new_st = get_effective_account_status(new_acc)
+                                        record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
+                                        
+                                        if is_preemptive:
+                                            notify_preemptive_switch(prev, new_acc, crit_pct)
+                                        else:
+                                            notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                                        
+                                        if conv_id:
+                                            logger.info(f"Reanudando tareas profundas en conversacion {conv_id}...")
+                                            await asyncio.sleep(2.0)
+                                            await navigate_to_conversation(page, conv_id)
+                                            await resume_with_context(page)
+                                    else:
+                                        logger.error("Fallo la rotacion automatica de cuenta.")
                                 
                 await browser.close()
         except Exception as e:

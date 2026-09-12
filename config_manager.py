@@ -202,6 +202,73 @@ def interactive_add_wizard():
     print(f"       Nivel:  {acc['tier']}")
     print("==========================================================")
 
+# =============================================================================
+# Area 4: Windows Startup Registry Management & Config Export / Import
+# =============================================================================
+
+RUN_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+APP_REG_NAME = "AntigravityTokenDock"
+
+def is_windows_startup_enabled() -> bool:
+    """Checks if Antigravity Token Dock is configured to start with Windows."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_KEY, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, APP_REG_NAME)
+            return bool(val)
+    except Exception:
+        return False
+
+def set_windows_startup(enabled: bool) -> bool:
+    """Enables or disables auto-starting Antigravity Token Dock on Windows login."""
+    try:
+        import winreg
+        import sys
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                pythonw_path = Path(sys.executable).parent / "pythonw.exe"
+                if not pythonw_path.exists():
+                    pythonw_path = Path(sys.executable)
+                script_path = BASE_DIR / "antigravity_docked_overlay.py"
+                cmd = f'"{pythonw_path}" "{script_path}"'
+                winreg.SetValueEx(key, APP_REG_NAME, 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_REG_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        return False
+
+def export_accounts_backup(dest_path: Path) -> bool:
+    """Exports clean accounts configuration to specified path."""
+    try:
+        accs = get_authorized_accounts()
+        clean = [{"email": a["email"], "name": a.get("name", ""), "tier": a.get("tier", "👑 Pro")} for a in accs]
+        with open(dest_path, "w", encoding="utf-8") as f:
+            json.dump({"accounts": clean, "version": "2.0"}, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+def import_accounts_backup(src_path: Path) -> int:
+    """Imports accounts from a backup file, merging without duplicates. Returns count imported."""
+    try:
+        with open(src_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        acc_list = data.get("accounts", data) if isinstance(data, dict) else data
+        if not isinstance(acc_list, list):
+            return 0
+        imported = 0
+        for item in acc_list:
+            if isinstance(item, dict) and "email" in item:
+                add_account(item["email"], name=item.get("name"), tier=item.get("tier", "👑 Pro"))
+                imported += 1
+        return imported
+    except Exception:
+        return 0
+
 if __name__ == "__main__":
     import sys
     import argparse
