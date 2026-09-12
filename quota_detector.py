@@ -286,8 +286,7 @@ def check_log_quota_errors(lookback_seconds: int = 60) -> Tuple[bool, str]:
             (r"MODEL_CAPACITY_EXHAUSTED", "Google Model Capacity Exhausted"),
             (r"RESOURCE_EXHAUSTED", "Google Resource Quota Exhausted"),
             (r"No capacity available for model", "No capacity available for model"),
-            (r'error_number":\s*"2010"', "Error 2010 (Model Capacity Exhausted)"),
-            (r"failed to get load code assist response:.*quota", "Quota Summary Refresh Error")
+            (r'error_number":\s*"2010"', "Error 2010 (Model Capacity Exhausted)")
         ]
         
         for line in reversed(recent_lines):

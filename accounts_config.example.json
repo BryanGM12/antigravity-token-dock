@@ -31,6 +31,7 @@
   ],
   "monitoring": {
     "poll_interval_sec": 20,
-    "hud_port": 59123
+    "hud_port": 59123,
+    "min_switch_threshold_pct": 0
   }
 }

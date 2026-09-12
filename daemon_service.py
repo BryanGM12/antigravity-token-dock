@@ -78,8 +78,7 @@ from notification_service import (
     send_windows_toast,
     notify_rotation_success,
     notify_token_refresh,
-    notify_dual_exhaustion_warning,
-    notify_preemptive_switch
+    notify_dual_exhaustion_warning
 )
 from analytics_engine import (
     record_usage_sample,
@@ -362,11 +361,7 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                     logger.info(f"[RECARGA COMPLETA] {rec_acc} ha alcanzado el 100% de cuota. Notificando...")
                     notify_token_refresh(rec_acc, "5 Horas")
 
-                # 4. Quota exhaustion and pre-emptive rotation evaluation
-                is_preemptive = False
-                crit_pct = 0
-                PREEMPTIVE_THRESHOLD = 5  # Safe buffer: rotate before in-flight prompt crashes
-
+                # 4. Evaluacion estricta de agotamiento de tokens (rotar UNICAMENTE al llegar a 0% o error critico)
                 if not is_exhausted:
                     mem = load_memory()
                     active_acc = mem.get("active_account")
@@ -376,16 +371,7 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                         p_wk = st.get("weekly_remaining_pct")
                         if (p_5h is not None and p_5h <= 0) or (p_wk is not None and p_wk <= 0):
                             is_exhausted = True
-                            reason = f"Cuota de cuenta activa en 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
-                        elif (p_5h is not None and p_5h <= PREEMPTIVE_THRESHOLD) or (p_wk is not None and p_wk <= PREEMPTIVE_THRESHOLD):
-                            # Only trigger pre-emptive if another account is ready
-                            val_list = [p for p in [p_5h, p_wk] if p is not None]
-                            crit_pct = min(val_list) if val_list else 0
-                            can_sw, _, _, tgt = evaluate_switch_readiness(active_acc)
-                            if can_sw and tgt:
-                                is_exhausted = True
-                                is_preemptive = True
-                                reason = f"Rotación preventiva inteligente (cuota crítica: {crit_pct}% <= {PREEMPTIVE_THRESHOLD}%)"
+                            reason = f"Cuota de tokens alcanzada al 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
                             
                 if is_exhausted:
                     # Check if user paused auto-switch
@@ -435,10 +421,7 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                             new_st = get_effective_account_status(new_acc)
                                             record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
                                             
-                                            if is_preemptive:
-                                                notify_preemptive_switch(prev, new_acc, crit_pct)
-                                            else:
-                                                notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                                            notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
                                                 
                                             if conv_id:
                                                 logger.info(f"Verificando conversacion {conv_id} activa...")
