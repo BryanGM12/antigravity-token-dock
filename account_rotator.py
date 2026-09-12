@@ -248,27 +248,27 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     if not oauth_handled:
         logger.warning("External OAuth handler did not confirm success; checking Antigravity state...")
         
-    # 6. Wait for Antigravity workbench to re-authenticate
+    # 6. Wait for Antigravity workbench to re-authenticate (fast polling)
     logger.info("Waiting for Antigravity workbench to confirm signedIn state...")
     authenticated = False
-    for _ in range(15):
+    for _ in range(25):
         if await is_authenticated_in_dom(page):
             authenticated = True
             break
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.4)
         
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(0.6)
     
-    # 7. Verify new account email
+    # 7. Verify new account email (fast polling)
     new_email = None
-    for _ in range(8):
+    for _ in range(12):
         try:
             new_email = await get_current_logged_in_email(page)
             if new_email and target_email.split("@")[0].lower() in new_email.lower():
                 break
         except Exception:
             pass
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.4)
         
     await close_settings(page)
     effective_new = new_email or target_email

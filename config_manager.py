@@ -81,14 +81,22 @@ def get_account_tab_map() -> Dict[str, int]:
             tab_map[email] = acc.get("tab_index", idx + 1)
     return tab_map
 
-def get_account_row_offset(email: str) -> int:
-    """Returns vertical pixel offset from anchor row in Google Account Chooser."""
+def get_account_index(email: str) -> int:
+    """Returns 0-based index of account in configured accounts list."""
     target = email.lower().strip()
     for idx, acc in enumerate(load_accounts_config()):
         acc_email = acc.get("email", "").lower().strip()
         if acc_email in target or target in acc_email:
-            return acc.get("row_offset", idx * 61)
+            return idx
     return 0
+
+def get_account_row_offset(email: str) -> int:
+    """Returns vertical pixel offset from viewport center in Google Account Chooser."""
+    idx = get_account_index(email)
+    base_offsets = [-43, 21, 85, 149]
+    if idx < len(base_offsets):
+        return base_offsets[idx]
+    return -43 + (idx * 64)
 
 def save_accounts_config(accounts: List[Dict[str, Any]], target_path: Optional[Path] = None):
     """Saves accounts to local config file."""

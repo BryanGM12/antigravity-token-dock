@@ -361,17 +361,31 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                     logger.info(f"[RECARGA COMPLETA] {rec_acc} ha alcanzado el 100% de cuota. Notificando...")
                     notify_token_refresh(rec_acc, "5 Horas")
 
-                # 4. Evaluacion estricta de agotamiento de tokens (rotar UNICAMENTE al llegar a 0% o error critico)
-                if not is_exhausted:
-                    mem = load_memory()
-                    active_acc = mem.get("active_account")
-                    if active_acc:
-                        st = get_effective_account_status(active_acc)
-                        p_5h = st.get("five_hour_remaining_pct")
-                        p_wk = st.get("weekly_remaining_pct")
-                        if (p_5h is not None and p_5h <= 0) or (p_wk is not None and p_wk <= 0):
-                            is_exhausted = True
-                            reason = f"Cuota de tokens alcanzada al 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
+                # 4. Evaluacion estricta de agotamiento de tokens: ROTAR UNICAMENTE AL LLEGAR A 0% DE TOKENS
+                # El usuario especifico: 'que la cuenta se cambie solo cuando llege a 0 de tokens'
+                mem = load_memory()
+                active_acc = mem.get("active_account")
+                if active_acc:
+                    st = get_effective_account_status(active_acc)
+                    p_5h = st.get("five_hour_remaining_pct")
+                    p_wk = st.get("weekly_remaining_pct")
+                    
+                    if p_5h is not None and p_5h > 0 and p_wk is not None and p_wk > 0:
+                        # Si la memoria indica tokens disponibles pero un log/chat marco agotamiento,
+                        # verificar cuota en vivo para confirmar si realmente llego a 0%
+                        if is_exhausted:
+                            live_limits = await get_quota_limits(page)
+                            l_5h = live_limits.get("five_hour_remaining_pct")
+                            l_wk = live_limits.get("weekly_remaining_pct")
+                            if (l_5h is not None and l_5h <= 0) or (l_wk is not None and l_wk <= 0):
+                                is_exhausted = True
+                                reason = f"Cuota de tokens alcanzada al 0% confirmada en vivo (5h: {l_5h}%, Semanal: {l_wk}%)"
+                            else:
+                                logger.info(f"[RETENCION ESTRICTA] Cuenta activa todavia tiene tokens (5h: {l_5h}%, Semanal: {l_wk}%). Omitiendo cambio.")
+                                is_exhausted = False
+                    elif (p_5h is not None and p_5h <= 0) or (p_wk is not None and p_wk <= 0):
+                        is_exhausted = True
+                        reason = f"Cuota de tokens alcanzada al 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
                             
                 if is_exhausted:
                     # Check if user paused auto-switch
