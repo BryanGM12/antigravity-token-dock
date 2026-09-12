@@ -1035,6 +1035,8 @@ class AntigravityDockedOverlay(QWidget):
         self.last_memory_mtime = 0
         self.win_event_hook = None
         self._hook_cb_ref = None
+        self.fg_event_hook = None
+        self._fg_hook_cb_ref = None
         self.sync_spin_step = 0
         self.last_toggle_time = 0.0
         self.is_dialog_active = False
@@ -1494,6 +1496,17 @@ class AntigravityDockedOverlay(QWidget):
         """Zero-lag Win32 tracking with SetWinEventHook + adaptive timer."""
         self.antigravity_hwnd = find_antigravity_hwnd()
 
+        WINEVENTPROC = ctypes.WINFUNCTYPE(
+            None,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.HWND,
+            wintypes.LONG,
+            wintypes.LONG,
+            wintypes.DWORD,
+            wintypes.DWORD
+        )
+
         if self.antigravity_hwnd:
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(self.antigravity_hwnd, ctypes.byref(pid))
@@ -1502,16 +1515,6 @@ class AntigravityDockedOverlay(QWidget):
                     if hwnd == self.antigravity_hwnd and idObject == 0:
                         self.update_dock_position()
 
-                WINEVENTPROC = ctypes.WINFUNCTYPE(
-                    None,
-                    wintypes.HANDLE,
-                    wintypes.DWORD,
-                    wintypes.HWND,
-                    wintypes.LONG,
-                    wintypes.LONG,
-                    wintypes.DWORD,
-                    wintypes.DWORD
-                )
                 self._hook_cb_ref = WINEVENTPROC(win_event_cb)
                 self.win_event_hook = user32.SetWinEventHook(
                     EVENT_OBJECT_LOCATIONCHANGE,
@@ -1522,6 +1525,21 @@ class AntigravityDockedOverlay(QWidget):
                     0,
                     WINEVENT_OUTOFCONTEXT
                 )
+
+        # Global foreground change hook: instantaneously reacts when another window is focused or maximized
+        def fg_event_cb(hWinEventHook, event, hwnd, idObject, idChild, dwEventThread, dwmsEventTime):
+            self.update_dock_position()
+
+        self._fg_hook_cb_ref = WINEVENTPROC(fg_event_cb)
+        self.fg_event_hook = user32.SetWinEventHook(
+            0x0003,  # EVENT_SYSTEM_FOREGROUND
+            0x0003,
+            0,
+            self._fg_hook_cb_ref,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT
+        )
 
         # High-speed heartbeat timer (25ms)
         self.dock_timer = QTimer(self)
@@ -1667,6 +1685,105 @@ class AntigravityDockedOverlay(QWidget):
             self.panel_opacity.setOpacity(1.0)
             QTimer.singleShot(40, self.refresh_memory_data)
 
+    def is_antigravity_occluded(self) -> bool:
+        """
+        Determines if Antigravity is occluded by another maximized/fullscreen window
+        or if another foreground window obscures the dock handle.
+        """
+        if not self.antigravity_hwnd or not user32.IsWindow(self.antigravity_hwnd):
+            return True
+
+        if user32.IsIconic(self.antigravity_hwnd) or not user32.IsWindowVisible(self.antigravity_hwnd):
+            return True
+
+        if self.is_dialog_active:
+            return False
+
+        my_win_id = int(self.winId()) if self.isVisible() else 0
+        fg = user32.GetForegroundWindow()
+
+        # Get Antigravity process ID to differentiate own dialogs/windows from other apps
+        pid_ag = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(self.antigravity_hwnd, ctypes.byref(pid_ag))
+
+        # If Antigravity or this overlay is the active foreground window, it is not occluded
+        if fg == self.antigravity_hwnd or (my_win_id and fg == my_win_id):
+            return False
+
+        # If foreground window belongs to the same Antigravity process (e.g. file dialog, popup)
+        if fg:
+            pid_fg = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(fg, ctypes.byref(pid_fg))
+            if pid_fg.value == pid_ag.value:
+                return False
+
+        hmon_ag = user32.MonitorFromWindow(self.antigravity_hwnd, 2)
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetMonitorInfoW(hmon_ag, ctypes.byref(mi))
+        work_r = mi.rcWork
+
+        # Compute pill handle screen bounding box
+        if self.last_rect:
+            lx, ly, lw, lh = self.last_rect
+            px1 = lx + (self.PANEL_TARGET_WIDTH if (self.current_dock_mode == "inside_right" and self.is_expanded) else 0)
+            py1 = ly
+            px2 = px1 + 28
+            py2 = py1 + 110
+        else:
+            tx, ty, _, _, mode = self.calculate_dock_geometry(for_expanded=False)
+            px1 = tx
+            py1 = ty
+            px2 = tx + 28
+            py2 = ty + 110
+
+        # 1. Fast Path: Foreground window check
+        if fg and fg != self.antigravity_hwnd and fg != my_win_id:
+            if user32.IsWindowVisible(fg) and not user32.IsIconic(fg):
+                if user32.MonitorFromWindow(fg, 2) == hmon_ag:
+                    if user32.IsZoomed(fg):
+                        return True
+                    r = wintypes.RECT()
+                    user32.GetWindowRect(fg, ctypes.byref(r))
+                    # Full work area coverage check (borderless fullscreen)
+                    if (r.left <= work_r.left + 8 and r.top <= work_r.top + 8 and
+                        r.right >= work_r.right - 8 and r.bottom >= work_r.bottom - 8):
+                        return True
+                    # Check if foreground window overlaps pill handle
+                    if not (r.right <= px1 or r.left >= px2 or r.bottom <= py1 or r.top >= py2):
+                        return True
+
+        # 2. Z-Order Inspection: Check all visible windows above Antigravity
+        GW_HWNDPREV = 3
+        curr = user32.GetWindow(self.antigravity_hwnd, GW_HWNDPREV)
+        class_buf = ctypes.create_unicode_buffer(256)
+        ignored_classes = {'progman', 'workerw', 'shell_traywnd', 'shelldropstatuswindow', 'windows.ui.core.corewindow'}
+
+        while curr:
+            if curr != my_win_id and user32.IsWindowVisible(curr) and not user32.IsIconic(curr):
+                pid_curr = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(curr, ctypes.byref(pid_curr))
+                if pid_curr.value != pid_ag.value:
+                    user32.GetClassNameW(curr, class_buf, 256)
+                    c_name = class_buf.value.lower()
+                    if c_name not in ignored_classes:
+                        if user32.MonitorFromWindow(curr, 2) == hmon_ag:
+                            r = wintypes.RECT()
+                            user32.GetWindowRect(curr, ctypes.byref(r))
+                            w_w = r.right - r.left
+                            w_h = r.bottom - r.top
+                            if w_w > 150 and w_h > 150:
+                                if user32.IsZoomed(curr):
+                                    return True
+                                if (r.left <= work_r.left + 8 and r.top <= work_r.top + 8 and
+                                    r.right >= work_r.right - 8 and r.bottom >= work_r.bottom - 8):
+                                    return True
+                                if not (r.right <= px1 or r.left >= px2 or r.bottom <= py1 or r.top >= py2):
+                                    return True
+            curr = user32.GetWindow(curr, GW_HWNDPREV)
+
+        return False
+
     def update_dock_position(self, force: bool = False):
         """Positions widget cleanly with zero lag and hardware acceleration."""
         if self.slide_anim.state() == QAbstractAnimation.State.Running and not force:
@@ -1679,8 +1796,17 @@ class AntigravityDockedOverlay(QWidget):
                     self.hide()
                 return
 
-        # Hide on minimize
-        if not user32.IsWindowVisible(self.antigravity_hwnd) or user32.IsIconic(self.antigravity_hwnd):
+        # Hide on minimize or when Antigravity is occluded by another maximized window
+        if not user32.IsWindowVisible(self.antigravity_hwnd) or user32.IsIconic(self.antigravity_hwnd) or self.is_antigravity_occluded():
+            if self.is_expanded:
+                self.is_expanded = False
+                self.pill_handle.set_expanded(False)
+                self.slide_anim.stop()
+                self.panel_container.setVisible(False)
+                self.stretch_widget.setVisible(False)
+                self.current_panel_w = 0
+                self.panel_opacity.setOpacity(0.0)
+                self.set_collapsed_geometry()
             if self.isVisible():
                 self.hide()
             return
@@ -2105,8 +2231,10 @@ class AntigravityDockedOverlay(QWidget):
             self.hotkey_thread.stop()
         if hasattr(self, "tray_icon"):
             self.tray_icon.hide()
-        if self.win_event_hook:
+        if hasattr(self, "win_event_hook") and self.win_event_hook:
             user32.UnhookWinEvent(self.win_event_hook)
+        if hasattr(self, "fg_event_hook") and self.fg_event_hook:
+            user32.UnhookWinEvent(self.fg_event_hook)
         super().closeEvent(event)
 
 def main():
