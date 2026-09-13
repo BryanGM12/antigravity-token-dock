@@ -235,16 +235,26 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         
     await asyncio.sleep(1.2)
     
-    # 4. Trigger Sign In flow
+    # 4. Trigger Sign In flow with Pre-Click HWND Snapshot
+    from external_oauth_handler import capture_browser_hwnds, get_default_browser_info
+    target_proc, _ = get_default_browser_info()
+    pre_hwnds = capture_browser_hwnds(target_proc)
+    logger.info(f"Captured {len(pre_hwnds)} pre-existing {target_proc} window(s) before sign-in trigger.")
+
     if not await wait_for_and_click_sign_in(page, timeout_sec=15):
         await close_settings(page)
         await asyncio.sleep(0.5)
         if not await wait_for_and_click_sign_in(page, timeout_sec=10):
             raise RuntimeError("Could not trigger Google Sign In button.")
             
-    # 5. Handle external Google OAuth in Comet
-    logger.info(f"Handling external Google OAuth in browser for {target_email}...")
-    oauth_handled = handle_external_google_signin(target_email, timeout_sec=40)
+    # 5. Handle external Google OAuth in default browser with isolation
+    logger.info(f"Handling external Google OAuth in {target_proc} for {target_email}...")
+    oauth_handled = handle_external_google_signin(
+        target_email,
+        timeout_sec=40,
+        pre_hwnds=pre_hwnds,
+        target_process=target_proc
+    )
     if not oauth_handled:
         logger.warning("External OAuth handler did not confirm success; checking Antigravity state...")
         

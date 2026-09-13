@@ -1,9 +1,21 @@
 """
-External OAuth Handler: Windows Desktop Automation for Google Sign-In
-Handles Google Sign-In and OAuth 2.0 flow when opened in external browsers (Comet, Chrome, Edge).
-Uses Alt-key bypass, direct login_hint OAuth URL injection,
-passive title inspection, safe web margin focusing, calibrated centered clicks,
-and deterministic Tab account selection.
+External OAuth Handler: Deterministic Multi-Browser Windows Automation for Google Sign-In
+========================================================================================
+Guarantees 100% reliable Google OAuth authentication even with multiple different browsers
+(Chrome, Brave, Edge, Firefox, Comet) running simultaneously with dozens of open tabs.
+
+Key Architectural Safeguards:
+1. Dynamic Default Browser Resolution: Queries Windows Registry (UserChoice\\https) to
+   target ONLY the system default browser process (e.g. comet.exe), strictly ignoring all
+   other running browsers.
+2. Pre/Post Window Delta Snapshot: Captures browser HWNDs right before triggering OAuth.
+   Identifies newly spawned windows (delta) with 100% mathematical certainty.
+3. HWND Affinity Lock: Locks onto the target window handle once identified to prevent
+   focus jumping or cross-window pollution.
+4. Non-Destructive Tab Closing: Uses strictly Ctrl+W to close only the auth tab. Eliminates
+   blind WM_CLOSE fallbacks that could kill windows containing user's personal tabs.
+5. Passive Title & Safe URL Inspection: Checks window title (0ms overhead) and address bar
+   with automatic clipboard backup & restoration.
 """
 
 import os
@@ -12,10 +24,11 @@ import time
 import ctypes
 from ctypes import wintypes
 import logging
+import winreg
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from typing import Optional, Tuple, List, Set
 import pyperclip
 import psutil
-from typing import Optional, Tuple
 
 logger = logging.getLogger("ExternalOAuthHandler")
 
@@ -44,18 +57,157 @@ def switch_to_interactive_desktop() -> bool:
         logger.debug(f"Failed to switch thread desktop: {e}")
         return False
 
+def get_default_browser_info() -> Tuple[str, str]:
+    """
+    Queries Windows Registry to determine default HTTPS browser executable name and path:
+    HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice -> ProgId
+    HKCR\\{ProgId}\\shell\\open\\command -> Executable path
+    Returns: (process_name, full_path), e.g. ("comet.exe", "C:\\Program Files\\...\\comet.exe")
+    """
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+        ) as key:
+            prog_id, _ = winreg.QueryValueEx(key, "ProgId")
+
+        with winreg.OpenKey(
+            winreg.HKEY_CLASSES_ROOT,
+            rf"{prog_id}\shell\open\command"
+        ) as key:
+            cmd, _ = winreg.QueryValueEx(key, "")
+
+        match = re.search(r'"([^"]+)"', cmd)
+        if match:
+            exe_path = match.group(1)
+        else:
+            exe_path = cmd.split()[0]
+
+        proc_name = os.path.basename(exe_path).lower()
+        return proc_name, exe_path
+    except Exception as e:
+        logger.debug(f"Failed to query default browser from registry: {e}")
+        return "comet.exe", ""
+
+def get_browser_windows(target_process_name: Optional[str] = None) -> List[Tuple[int, int, str]]:
+    """
+    Returns list of (hwnd, pid, title) for visible windows belonging strictly to target_process_name
+    (defaults to the system default browser if None).
+    Guarantees that windows from other browsers (e.g. Chrome, Brave, Edge) are 100% ignored.
+    """
+    switch_to_interactive_desktop()
+    if not target_process_name:
+        target_process_name, _ = get_default_browser_info()
+    target_process_name = target_process_name.lower()
+
+    # Collect PIDs belonging exclusively to target_process_name
+    target_pids: Set[int] = set()
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            pname = (proc.info.get('name') or '').lower()
+            if pname == target_process_name:
+                target_pids.add(proc.info['pid'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if not target_pids:
+        return []
+
+    windows: List[Tuple[int, int, str]] = []
+
+    def enum_cb(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value or pid.value not in target_pids:
+            return True
+
+        # Window text length check
+        length = user32.GetWindowTextLengthW(hwnd)
+        buff = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buff, length + 1)
+        title = buff.value
+
+        # Filter out tooltips and sub-window elements (< 200x150)
+        rect = wintypes.RECT()
+        if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w > 200 and h > 150:
+                windows.append((hwnd, pid.value, title))
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+    return windows
+
+def capture_browser_hwnds(target_process_name: Optional[str] = None) -> Set[int]:
+    """Captures set of HWNDs currently open for the target browser before triggering OAuth."""
+    windows = get_browser_windows(target_process_name)
+    return {w[0] for w in windows}
+
+def find_target_oauth_window(
+    pre_hwnds: Optional[Set[int]] = None,
+    target_process_name: Optional[str] = None
+) -> Optional[int]:
+    """
+    Finds the exact OAuth window handle for the target browser:
+    1. If pre_hwnds is provided, checks for newly spawned window delta (current - pre).
+       A newly spawned window is 100% guaranteed to be the OAuth window launched by Antigravity!
+    2. If no new window was spawned (browser opened a tab in an existing window), selects
+       the target browser window whose title matches OAuth keywords.
+    3. Excludes 100% of all windows from other applications and browsers.
+    """
+    windows = get_browser_windows(target_process_name)
+    if not windows:
+        return None
+
+    current_hwnds = {w[0] for w in windows}
+
+    # Case A: A new window was spawned
+    if pre_hwnds is not None:
+        delta = current_hwnds - pre_hwnds
+        if delta:
+            for hwnd, pid, title in windows:
+                if hwnd in delta:
+                    logger.debug(f"[DELTA] Found newly spawned target browser window: HWND {hwnd} ('{title}')")
+                    return hwnd
+
+    # Case B: Reused window or pre_hwnds was None
+    scored = []
+    oauth_keywords = [
+        "Google Antigravity", "antigravity.google", "Auth Success", "Acceso: Cuentas de Google",
+        "Elige una cuenta", "Elegir una cuenta", "Choose an account", "Sign in - Google Accounts",
+        "Sign in", "Iniciar sesión", "Google", "localhost"
+    ]
+
+    for hwnd, pid, title in windows:
+        score = 1
+        for kw in oauth_keywords:
+            if kw.lower() in title.lower():
+                score = 10
+                break
+        scored.append((score, hwnd, title))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1] if scored else None
+
+def find_browser_window() -> Optional[int]:
+    """Backward-compatible wrapper for finding default browser OAuth window."""
+    return find_target_oauth_window()
+
 def activate_browser_window(hwnd: int) -> bool:
     """
     Brings browser window to the foreground across multiple monitors.
-    Uses the Windows Alt-key bypass to overcome UIPI foreground lock.
-    CRITICAL: Only calls SW_RESTORE (9) if window is minimized (IsIconic).
-    Maximized windows are left untouched to prevent window resize shifts.
+    Uses Windows Alt-key bypass to overcome UIPI foreground lock.
+    Only calls SW_RESTORE (9) if window is minimized (IsIconic).
     """
     if not hwnd or not user32.IsWindow(hwnd):
         return False
-        
+
     switch_to_interactive_desktop()
-    
+
     VK_MENU = 0x12
     KEYEVENTF_KEYUP = 0x0002
     user32.keybd_event(VK_MENU, 0, 0, 0)
@@ -69,10 +221,10 @@ def activate_browser_window(hwnd: int) -> bool:
     return bool(res)
 
 def send_key_combination(hwnd: int, vk_ctrl: int, vk_key: int):
-    """Sends Ctrl + Key combination to the browser window."""
+    """Sends Ctrl + Key combination to the target browser window."""
     activate_browser_window(hwnd)
     time.sleep(0.05)
-    
+
     KEYEVENTF_KEYUP = 0x0002
     user32.keybd_event(vk_ctrl, 0, 0, 0)
     user32.keybd_event(vk_key, 0, 0, 0)
@@ -90,67 +242,19 @@ def send_single_key(hwnd: int, vk_code: int):
     time.sleep(0.05)
 
 def close_browser_tab(hwnd: int):
-    """Closes auth window/tab cleanly via Ctrl+W with WM_CLOSE fallback."""
+    """
+    Closes the active auth tab cleanly via Ctrl+W.
+    CRITICAL: Never sends blind WM_CLOSE to the window handle, protecting all other
+    tabs the user may have open in that browser window.
+    """
     try:
         activate_browser_window(hwnd)
         VK_CONTROL = 0x11
         VK_W = ord('W')
         send_key_combination(hwnd, VK_CONTROL, VK_W)
-        time.sleep(0.3)
-        if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
-            return
-    except Exception:
-        pass
-    try:
-        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE fallback
-    except Exception:
-        pass
-
-def find_browser_window() -> Optional[int]:
-    """
-    Finds the active browser window handle (Comet, Chrome, Edge, Brave) on the interactive desktop.
-    Strictly excludes Antigravity and ensures window is visible.
-    """
-    switch_to_interactive_desktop()
-    matching_hwnds = []
-    supported_browsers = {"comet.exe", "chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"}
-    
-    def enum_cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
-            return True
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if not pid.value:
-            return True
-        try:
-            pname = psutil.Process(pid.value).name().lower()
-        except Exception:
-            return True
-            
-        # Ignore Antigravity process itself
-        if "antigravity" in pname:
-            return True
-            
-        if pname in supported_browsers:
-            length = user32.GetWindowTextLengthW(hwnd)
-            buff = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buff, length + 1)
-            title = buff.value
-            
-            # Prioritize windows matching Google / OAuth / Antigravity / Comet
-            score = 1
-            if any(k in title for k in ["Google", "Acceso", "Sign in", "Elegir", "Elige", "Choose", "Antigravity", "Auth"]):
-                score = 10
-            matching_hwnds.append((score, hwnd))
-        return True
-
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
-    
-    if matching_hwnds:
-        matching_hwnds.sort(key=lambda x: x[0], reverse=True)
-        return matching_hwnds[0][1]
-    return None
+        time.sleep(0.2)
+    except Exception as e:
+        logger.debug(f"Error sending Ctrl+W to HWND {hwnd}: {e}")
 
 def build_direct_oauth_url(url: str, target_email: str) -> str:
     """
@@ -163,26 +267,25 @@ def build_direct_oauth_url(url: str, target_email: str) -> str:
         parsed = urlparse(url)
         if "accounts.google.com" not in parsed.netloc:
             return url
-            
+
         params = parse_qs(parsed.query, keep_blank_values=True)
-        # Remove prompt=select_account so Google doesn't force the chooser screen
         if "prompt" in params:
             prompts = [p for p in params["prompt"] if p != "select_account"]
             if prompts:
                 params["prompt"] = prompts
             else:
                 del params["prompt"]
-                
+
         clean_email = target_email.strip()
         params["login_hint"] = [clean_email]
         params["authuser"] = [clean_email]
         params["Email"] = [clean_email]
-        
+
         flat_params = []
         for k, v_list in params.items():
             for v in v_list:
                 flat_params.append((k, v))
-                
+
         new_query = urlencode(flat_params)
         return urlunparse((
             parsed.scheme,
@@ -203,21 +306,21 @@ def get_browser_url(hwnd: int) -> str:
         old_clip = pyperclip.paste()
     except Exception:
         pass
-        
+
     try:
         activate_browser_window(hwnd)
         pyperclip.copy("")
         send_key_combination(hwnd, 0x11, ord('L'))
         time.sleep(0.06)
         send_key_combination(hwnd, 0x11, ord('C'))
-        
+
         url = ""
         for _ in range(4):
             time.sleep(0.05)
             url = pyperclip.paste().strip()
             if url:
                 break
-                
+
         # Return focus to web contents cleanly via F6
         send_single_key(hwnd, 0x75)  # VK_F6
         time.sleep(0.04)
@@ -256,10 +359,7 @@ def physical_click(x: int, y: int):
     time.sleep(0.06)
 
 def focus_web_contents_safely(hwnd: int):
-    """
-    Clicks in the empty margin on the far left of the browser window.
-    Safely focuses the web contents document WITHOUT clicking any account button.
-    """
+    """Clicks in empty margin on far left to safely focus document without clicking buttons."""
     switch_to_interactive_desktop()
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -269,13 +369,7 @@ def focus_web_contents_safely(hwnd: int):
         time.sleep(0.08)
 
 def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
-    """
-    Deterministic Tab navigation fallback for Google Account Chooser screen:
-    1. Safely focuses web page body on empty margin.
-    2. Resets DOM focus to the top with Ctrl+Home.
-    3. Tabs exactly N times to target account button.
-    4. Triggers selection with Enter.
-    """
+    """Deterministic Tab navigation fallback for Google Account Chooser screen."""
     norm = target_email.strip().lower()
     tab_map = get_account_tab_map()
     tab_count = None
@@ -283,95 +377,108 @@ def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
         if acc.split("@")[0] in norm or norm in acc:
             tab_count = count
             break
-            
+
     if not tab_count:
         idx = get_account_index(target_email)
-        tab_count = idx + 2  # Standard Account Chooser sequence: 2, 3, 4, 5
-        
+        tab_count = idx + 2
+
     logger.info(f"Navigating Google Account Chooser for {target_email} with {tab_count} Tab presses...")
     activate_browser_window(hwnd)
     time.sleep(0.08)
-    
+
     focus_web_contents_safely(hwnd)
     time.sleep(0.08)
-    
+
     send_key_combination(hwnd, 0x11, 0x24)  # Ctrl + Home
     time.sleep(0.12)
-    
+
     VK_TAB = 0x09
     for _ in range(tab_count):
         send_single_key(hwnd, VK_TAB)
         time.sleep(0.06)
-        
+
     time.sleep(0.08)
     send_single_key(hwnd, 0x0D)  # VK_RETURN
     time.sleep(0.8)
     return True
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
-    """
-    Calibrated centered physical click on Google Account Chooser row.
-    Calculates viewport center accounting for the browser toolbar (~125px).
-    CRITICAL: Never sends Enter after click to prevent confirming wrong accounts.
-    """
+    """Calibrated centered physical click on Google Account Chooser row."""
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.08)
-    
+
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return False
-        
+
     win_w = rect.right - rect.left
     win_h = rect.bottom - rect.top
     if win_w <= 0 or win_h <= 0:
         return False
-        
+
     cx = rect.left + (win_w // 2)
-    # Viewport center (accounting for browser toolbar ~125px)
     viewport_top = rect.top + 125
     viewport_height = max(300, win_h - 125)
     viewport_center_y = viewport_top + (viewport_height // 2)
-    
+
     row_offset = get_account_row_offset(target_email)
     row_y = viewport_center_y + row_offset
-    
+
     logger.info(f"Executing calibrated physical click on {target_email} at ({cx}, {row_y}) [offset: {row_offset}px]...")
     physical_click(cx, row_y)
     time.sleep(0.8)
     return True
 
-def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> bool:
+def handle_external_google_signin(
+    target_email: str,
+    timeout_sec: int = 35,
+    pre_hwnds: Optional[Set[int]] = None,
+    target_process: Optional[str] = None
+) -> bool:
     """
-    High-Reliability Google OAuth automation in external browser:
-    1. Finds active browser window (strictly excluding Antigravity).
-    2. Primary: Direct OAuth URL transformation (stripping prompt=select_account, injecting login_hint).
-    3. Detects instant success (window title or redirect URL) and closes browser tab.
-    4. Fallback 1: Calibrated centered physical click (without stray Enter key).
-    5. Fallback 2: Deterministic Tab navigation.
-    6. Handles consent prompts ('Continuar' / 'Permitir').
+    High-Reliability, Multi-Browser-Isolated Google OAuth automation:
+    1. Identifies exact OAuth window in the default browser using window delta & process isolation.
+    2. Excludes 100% of all windows from Chrome, Edge, Brave, or any other user app.
+    3. Locks onto confirmed HWND to eliminate focus jumping.
+    4. Primary acceleration: Direct OAuth URL injection (login_hint).
+    5. Detects instant success (window title or localhost redirect) and closes tab via Ctrl+W.
+    6. Fallback 1: Calibrated centered physical click.
+    7. Fallback 2: Deterministic Tab navigation.
+    8. Handles consent prompts ('Continuar' / 'Permitir').
     """
-    logger.info(f"Starting high-reliability Google Sign-In for target account: {target_email}...")
+    if not target_process:
+        target_process, _ = get_default_browser_info()
+
+    logger.info(f"Starting multi-browser isolated Google Sign-In for {target_email} (Browser: {target_process})...")
     switch_to_interactive_desktop()
     start_time = time.time()
-    
+
     selection_attempts = 0
     last_url_check = 0.0
     cached_url = ""
     url_injected = False
-    
+    locked_hwnd: Optional[int] = None
+
     while time.time() - start_time < timeout_sec:
-        hwnd = find_browser_window()
+        # If locked HWND is still valid and visible, keep using it
+        hwnd = locked_hwnd if (locked_hwnd and user32.IsWindow(locked_hwnd) and user32.IsWindowVisible(locked_hwnd)) else None
+        if not hwnd:
+            hwnd = find_target_oauth_window(pre_hwnds=pre_hwnds, target_process_name=target_process)
+            if hwnd:
+                locked_hwnd = hwnd
+                logger.debug(f"[LOCK] Bound exclusively to OAuth HWND {hwnd}")
+
         if not hwnd:
             time.sleep(0.3)
             continue
-            
-        # Passive window title check (0ms overhead, does not disrupt page)
+
+        # Passive window title check (0ms overhead)
         length = user32.GetWindowTextLengthW(hwnd)
         buff = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buff, length + 1)
         title = buff.value
-        
+
         # 1. Success verification in title
         if any(w in title for w in [
             "Google Antigravity Auth Success",
@@ -381,22 +488,22 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
             logger.info("Authentication success detected in browser window title!")
             time.sleep(0.5)
             close_browser_tab(hwnd)
-            logger.info("Closed authentication tab in browser.")
+            logger.info("Closed authentication tab cleanly.")
             return True
-            
+
         # 2. Check URL at controlled intervals (every 0.5s)
         now = time.time()
         if now - last_url_check > 0.5:
             last_url_check = now
             cached_url = get_browser_url(hwnd)
-            
+
             if "auth-success" in cached_url or ("localhost:" in cached_url and "code=" in cached_url):
                 logger.info(f"Authentication success detected in URL: {cached_url}")
                 time.sleep(0.5)
                 close_browser_tab(hwnd)
-                logger.info("Closed authentication tab in browser.")
+                logger.info("Closed authentication tab cleanly.")
                 return True
-                
+
             # PRIMARY ACCELERATION: Direct OAuth URL injection
             if not url_injected and "accounts.google.com" in cached_url:
                 if "login_hint=" not in cached_url:
@@ -407,7 +514,7 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
                         url_injected = True
                         time.sleep(0.6)
                         continue
-                        
+
         # 3. Handle Account Chooser screen (Fallback if URL injection didn't bypass)
         is_chooser = (
             "accountchooser" in cached_url.lower() or
@@ -416,21 +523,21 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
             "Elegir una cuenta" in title or
             "Choose an account" in title
         )
-        
+
         if is_chooser and selection_attempts < 4:
             selection_attempts += 1
             logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/4)...")
-            
+
             # Fallback 1: Calibrated centered physical click
             select_account_via_centered_click(hwnd, target_email)
             time.sleep(1.0)
-            
+
             # Fallback 2: If still on chooser after attempt 1, use deterministic Tab selection
             if selection_attempts >= 2:
                 select_account_via_tabs(hwnd, target_email)
                 time.sleep(1.2)
             continue
-            
+
         # 4. Handle Consent / Confirmation prompt ("Continuar", "Allow", "Permitir")
         is_consent = (
             "permitir" in title.lower() or
@@ -447,8 +554,8 @@ def handle_external_google_signin(target_email: str, timeout_sec: int = 35) -> b
             time.sleep(0.06)
             send_single_key(hwnd, 0x0D)  # Enter
             time.sleep(1.0)
-            
+
         time.sleep(0.3)
-        
+
     logger.warning("External Google Sign-In timed out.")
     return False

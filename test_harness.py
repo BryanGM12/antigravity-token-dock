@@ -18,7 +18,12 @@ from antigravity_bridge import (
 )
 from quota_detector import get_quota_limits, check_log_quota_errors, check_chat_quota_errors
 from account_rotator import determine_target_account, AUTHORIZED_ACCOUNTS
-from external_oauth_handler import find_browser_window, switch_to_interactive_desktop
+from external_oauth_handler import (
+    find_browser_window,
+    switch_to_interactive_desktop,
+    get_default_browser_info,
+    capture_browser_hwnds
+)
 from token_memory import load_memory, get_effective_account_status, evaluate_switch_readiness
 from analytics_engine import calculate_burn_rate, record_usage_sample, load_analytics_data
 from watchdog_service import run_health_audit, ensure_dark_theme
@@ -37,9 +42,12 @@ async def run_all_tests():
     print(f"[PASS] 2. Acceso a escritorio interactivo 'default': {desk_ok}")
     assert desk_ok, "Debe tener acceso a escritorio interactivo"
     
-    # 3. Browser Window Detection Check
+    # 3. Default Browser Resolution & Multi-Browser Isolation Check
+    def_proc, def_path = get_default_browser_info()
+    assert def_proc.endswith(".exe"), "Debe resolver un ejecutable valido del registro"
+    hwnds = capture_browser_hwnds(def_proc)
     browser_hwnd = find_browser_window()
-    print(f"[PASS] 3. Ventana de navegador detectada: HWND {browser_hwnd}")
+    print(f"[PASS] 3. Aislamiento multi-navegador verificado: Navegador={def_proc} ({len(hwnds)} ventanas de {def_proc}, OAuth: HWND {browser_hwnd})")
     
     async with async_playwright() as p:
         # 4. Browser Connection

@@ -67,24 +67,45 @@ def switch_to_interactive_desktop() -> bool:
 
 def cleanup_orphan_comet_auth_tabs() -> int:
     """
-    Finds any lingering 'Google Antigravity Auth Success' tabs in Comet and closes them.
+    Finds any lingering 'Google Antigravity Auth Success' tabs in the default browser and closes them cleanly.
     Returns the number of cleaned tabs.
     """
     switch_to_interactive_desktop()
     closed_count = 0
     
+    try:
+        from external_oauth_handler import get_default_browser_info, close_browser_tab
+        target_proc, _ = get_default_browser_info()
+    except Exception:
+        target_proc = "comet.exe"
+        close_browser_tab = None
+
+    target_pids = set()
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            pname = (proc.info.get('name') or '').lower()
+            if pname == target_proc.lower():
+                target_pids.add(proc.info['pid'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if not target_pids:
+        return 0
+        
     matching_hwnds = []
     def enum_cb(hwnd, lparam):
         if user32.IsWindowVisible(hwnd):
-            cls_buff = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, cls_buff, 256)
-            if cls_buff.value == "Chrome_WidgetWin_1":
-                length = user32.GetWindowTextLengthW(hwnd)
-                buff = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buff, length + 1)
-                title = buff.value
-                if "Google Antigravity Auth Success" in title or "auth-success" in title:
-                    matching_hwnds.append(hwnd)
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value or pid.value not in target_pids:
+                return True
+                
+            length = user32.GetWindowTextLengthW(hwnd)
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            title = buff.value
+            if "Google Antigravity Auth Success" in title or "antigravity.google/auth-success" in title:
+                matching_hwnds.append(hwnd)
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
@@ -92,9 +113,11 @@ def cleanup_orphan_comet_auth_tabs() -> int:
     
     for hwnd in matching_hwnds:
         try:
-            logger.info(f"Closing leftover Comet auth window: HWND {hwnd}...")
-            # Post WM_CLOSE directly to close window cleanly in background without focus stealing
-            user32.PostMessageW(hwnd, 0x0010, 0, 0)
+            logger.info(f"Closing leftover auth tab in {target_proc}: HWND {hwnd}...")
+            if close_browser_tab:
+                close_browser_tab(hwnd)
+            else:
+                user32.PostMessageW(hwnd, 0x0010, 0, 0)
             closed_count += 1
             time.sleep(0.1)
         except Exception as e:
