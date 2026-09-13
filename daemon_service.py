@@ -70,7 +70,8 @@ from token_memory import (
     load_memory,
     is_auto_switch_enabled,
     get_pinned_account,
-    check_recharge_notifications
+    check_recharge_notifications,
+    update_account_snapshot
 )
 
 # New Subsystems
@@ -318,19 +319,19 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                 logger.info("Antigravity cerrado. Finalizando daemon ordenadamente.")
                 break
                 
-        # Watchdog: cleanup orphan Comet authentication tabs
+        # 1. Check if another process holds rotation lock (e.g. manual switch from Dock overlay or CLI)
+        if is_rotation_locked():
+            logger.info("[LOCK] Rotacion en curso por otro proceso. Pausando sondeo y watchdog...")
+            await asyncio.sleep(poll_interval_sec)
+            continue
+
+        # 2. Watchdog: cleanup orphan Comet authentication tabs (only when no rotation is in progress)
         try:
             cleaned = cleanup_orphan_comet_auth_tabs()
             if cleaned > 0:
                 logger.info(f"[Watchdog] Cerradas {cleaned} pestana(s) huerfanas de Comet.")
         except Exception as e:
             logger.debug(f"[Watchdog] Error limpiando pestanas huerfanas: {e}")
-
-        # Check if another process holds rotation lock (e.g. manual switch from Dock overlay)
-        if is_rotation_locked():
-            logger.info("[LOCK] Rotacion manual en curso por otro proceso. Pausando sondeo CDP...")
-            await asyncio.sleep(poll_interval_sec)
-            continue
                 
         try:
             # 1. Fast check: language_server.log
@@ -385,22 +386,24 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                         p_5h = live_limits.get("five_hour_remaining_pct")
                         p_wk = live_limits.get("weekly_remaining_pct")
                         
-                    if p_5h is not None and p_5h > 0 and p_wk is not None and p_wk > 0:
-                        # Si la memoria indica tokens disponibles pero un log/chat marco agotamiento,
-                        # verificar cuota en vivo para confirmar si realmente llego a 0%
-                        if is_exhausted:
-                            live_limits = await get_quota_limits(page)
-                            l_5h = live_limits.get("five_hour_remaining_pct")
-                            l_wk = live_limits.get("weekly_remaining_pct")
-                            if (l_5h is not None and l_5h <= 0) or (l_wk is not None and l_wk <= 0):
-                                is_exhausted = True
-                                reason = f"Cuota de tokens alcanzada al 0% confirmada en vivo (5h: {l_5h}%, Semanal: {l_wk}%)"
-                            else:
-                                logger.info(f"[RETENCION ESTRICTA] Cuenta activa todavia tiene tokens (5h: {l_5h}%, Semanal: {l_wk}%). Omitiendo cambio.")
-                                is_exhausted = False
+                    # 4. Evaluación rigurosa de agotamiento:
+                    # Caso A: Error explícito en chat (bloqueo real de conversación para el usuario)
+                    if chat_exhausted:
+                        is_exhausted = True
+                        reason = f"Error explícito de cuota en chat: {chat_reason}"
+                    # Caso B: Cuota de tokens al 0% en memoria o en vivo
                     elif (p_5h is not None and p_5h <= 0) or (p_wk is not None and p_wk <= 0):
                         is_exhausted = True
                         reason = f"Cuota de tokens alcanzada al 0% (5h: {p_5h}%, Semanal: {p_wk}%)"
+                    # Caso C: Error en language_server (RESOURCE_EXHAUSTED / MODEL_CAPACITY_EXHAUSTED) con cuota crítica (<= 5%)
+                    elif log_exhausted and ((p_5h is not None and p_5h <= 5) or (p_wk is not None and p_wk <= 5)):
+                        is_exhausted = True
+                        reason = f"Agotamiento en language_server con cuota crítica: {log_reason} (5h: {p_5h}%, Semanal: {p_wk}%)"
+                    else:
+                        # Si todavía tiene tokens (> 5%) y no hay error en el chat, retener la cuenta activa
+                        if is_exhausted:
+                            logger.info(f"[RETENCION] Cuenta activa todavía tiene tokens (5h: {p_5h}%, Semanal: {p_wk}%) y sin errores en chat. Continuando.")
+                            is_exhausted = False
                             
                 if is_exhausted:
                     # Check if user paused auto-switch
@@ -431,6 +434,17 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                     if not current_email:
                                         current_email = await get_current_logged_in_email(page, close_after=True)
                                         
+                                    if current_email:
+                                        try:
+                                            # Sincronizar memoria para marcar inmediatamente la cuenta agotada en 0%
+                                            update_account_snapshot(
+                                                current_email,
+                                                five_hour_pct=0,
+                                                five_hour_refresh_text="4h 0m"
+                                            )
+                                        except Exception as snap_err:
+                                            logger.debug(f"Error sincronizando snapshot de cuenta agotada: {snap_err}")
+                                            
                                     can_switch, switch_reason, wait_sec, best_target = evaluate_switch_readiness(current_email)
                                     
                                     if not can_switch:

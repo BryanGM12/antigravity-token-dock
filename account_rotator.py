@@ -112,14 +112,17 @@ async def sign_out(page: Page) -> bool:
     # 1. Primary Engine: Fast Programmatic Logout
     if await programmatic_sign_out(page):
         logger.info("Programmatic logout dispatched. Verifying signed-out transition...")
-        for _ in range(12):
-            await asyncio.sleep(0.3)
+        if not await is_authenticated_in_dom(page) or "/onboarding" in (page.url or ""):
+            logger.info("Verified sign-out state via authService state machine immediately.")
+            return True
+        for _ in range(24):
+            await asyncio.sleep(0.05)
             if not await is_authenticated_in_dom(page) or "/onboarding" in (page.url or ""):
                 logger.info("Verified sign-out state via authService state machine.")
                 return True
             if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
                 return True
-        logger.warning("Programmatic logout dispatched but state did not flip within 3.6s; falling back to UI.")
+        logger.warning("Programmatic logout dispatched but state did not flip within 1.2s; falling back to UI.")
 
     # 2. Fallback Engine: UI Dialog & Modal Handling
     dialog_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
@@ -210,7 +213,9 @@ async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
                 }
             }
             if (core?.authService?.loginWithRedirect) {
-                await core.authService.loginWithRedirect({ isGcpTos: false });
+                // Trigger OAuth flow asynchronously without awaiting the Promise,
+                // so Python immediately proceeds to handle external browser OAuth.
+                core.authService.loginWithRedirect({ isGcpTos: false }).catch(() => {});
                 return true;
             }
             return false;
@@ -356,7 +361,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
             else:
                 raise RuntimeError("Failed to execute Sign Out in Antigravity.")
         
-    await asyncio.sleep(1.2)
+    await asyncio.sleep(0.05)
     
     # 4. Trigger Sign In flow with Pre-Click HWND Snapshot
     from external_oauth_handler import capture_browser_hwnds, get_default_browser_info

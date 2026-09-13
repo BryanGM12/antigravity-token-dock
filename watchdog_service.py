@@ -72,7 +72,20 @@ def cleanup_orphan_comet_auth_tabs() -> int:
     """
     switch_to_interactive_desktop()
     closed_count = 0
-    
+
+    # Never close auth tabs if a rotation is actively in progress
+    lock_file = os.path.expandvars(r"%USERPROFILE%\.openclaw\workspace\state\antigravity_controller\rotation.lock")
+    if os.path.exists(lock_file):
+        try:
+            with open(lock_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            lock_time = data.get("time", 0)
+            if (time.time() - lock_time) < 90:
+                logger.debug("[Watchdog] Rotación activa detectada en lockfile. Omitiendo limpieza de pestañas.")
+                return 0
+        except Exception:
+            pass
+
     try:
         from external_oauth_handler import get_default_browser_info, close_browser_tab
         target_proc, _ = get_default_browser_info()
