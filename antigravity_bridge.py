@@ -96,16 +96,24 @@ async def open_settings(page: Page) -> bool:
     if await dialog.count() > 0 and await dialog.is_visible():
         return True
         
-    settings_btn = page.locator('[data-testid="settings-button"]')
-    if await settings_btn.count() == 0:
-        return False
-        
-    await settings_btn.click()
+    settings_btn = page.locator('[data-testid="settings-button"], button[aria-label="Settings"], button:has-text("Settings")')
+    if await settings_btn.count() > 0 and await settings_btn.first.is_visible():
+        try:
+            await settings_btn.first.click()
+            await page.wait_for_selector('div[role="dialog"]', timeout=2500)
+            return True
+        except Exception:
+            pass
+
+    # Global keyboard shortcut fallback (Ctrl+,)
     try:
-        await page.wait_for_selector('div[role="dialog"]', timeout=3000)
+        await page.keyboard.press("Control+,")
+        await page.wait_for_selector('div[role="dialog"]', timeout=2500)
         return True
     except Exception:
-        return False
+        pass
+
+    return False
 
 async def close_settings(page: Page) -> bool:
     """Closes the Settings dialog if open."""
@@ -129,10 +137,45 @@ async def navigate_settings_tab(page: Page, tab_name: str) -> bool:
         return False
         
     await asyncio.sleep(0.3)
-    # Direct JS click to avoid DOM animation detachment issues
+
+    # If seeking Account, check if Sign Out or Sign In is already visible
+    if tab_name.lower() == "account":
+        sign_btn = page.locator('div[role="dialog"] button:has-text("Sign Out"), div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Cerrar sesión")')
+        if await sign_btn.count() > 0 and await sign_btn.first.is_visible():
+            return True
+
+    # Direct JS click matching testid or innerText/email
     clicked = await page.evaluate(f'''() => {{
-        const btn = document.querySelector('[data-testid="settings-nav-item-{tab_name}"]') ||
-                    Array.from(document.querySelectorAll('div[role="dialog"] button')).find(b => (b.innerText || '').trim().toLowerCase() === '{tab_name.lower()}');
+        const tab = "{tab_name.lower()}";
+        // 1. Direct testid match
+        let btn = document.querySelector(`[data-testid="settings-nav-item-{tab_name}"]`);
+        if (btn) {{
+            btn.click();
+            return true;
+        }}
+        // 2. Query all nav/aside buttons
+        const allBtns = Array.from(document.querySelectorAll('div[role="dialog"] nav button, div[role="dialog"] aside button, div[role="dialog"] [role="tablist"] button, div[role="dialog"] button'));
+        btn = allBtns.find(b => {{
+            const tid = (b.getAttribute('data-testid') || '').toLowerCase();
+            return tid === `settings-nav-item-${{tab}}` || tid.includes(tab);
+        }});
+        if (btn) {{
+            btn.click();
+            return true;
+        }}
+        // 3. For Account tab: match button containing user email or account
+        if (tab === 'account') {{
+            btn = allBtns.find(b => {{
+                const txt = (b.innerText || '').toLowerCase();
+                return (txt.includes('@') && !txt.includes('feedback')) || txt.includes('account') || txt.includes('cuenta');
+            }});
+            if (btn) {{
+                btn.click();
+                return true;
+            }}
+        }}
+        // 4. By exact inner text
+        btn = allBtns.find(b => (b.innerText || '').trim().toLowerCase() === tab);
         if (btn) {{
             btn.click();
             return true;
@@ -143,7 +186,7 @@ async def navigate_settings_tab(page: Page, tab_name: str) -> bool:
         await asyncio.sleep(0.4)
         return True
         
-    # Tab names: 'Account', 'Models', 'General', 'Application', 'Appearance', etc.
+    # Tab names fallback: 'Account', 'Models', 'General', 'Application', 'Appearance', etc.
     tab_locator = page.locator(f'[data-testid="settings-nav-item-{tab_name}"]')
     if await tab_locator.count() > 0:
         try:

@@ -59,8 +59,50 @@ def determine_target_account(current_email: str) -> str:
 
 async def sign_out(page: Page) -> bool:
     """Navigates to Account settings and executes Sign Out."""
-    logger.info("Opening Account settings to sign out...")
+    logger.info("Checking sign out state / opening Account settings...")
+    
+    # Check if already on /onboarding or sign in page
+    if "/onboarding" in page.url:
+        logger.info("Antigravity is already on /onboarding page. Sign out is already complete.")
+        return True
+        
+    entrance_btn = page.locator('.entrance-auth-panel button, button:has-text("Continue with Google")')
+    if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
+        logger.info("Antigravity onboarding entrance is already visible. Sign out is already complete.")
+        return True
+        
+    # Check if Settings dialog is already open and shows Sign In
+    dialog_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
+    if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
+        logger.info("Settings dialog is already open and shows 'Sign In'. User is already signed out.")
+        return True
+
+    # Check if Sign Out button is ALREADY visible right now in open dialog
+    sign_out_btn = page.locator('div[role="dialog"] button:has-text("Sign Out"), div[role="dialog"] button:has-text("Cerrar sesión")')
+    if await sign_out_btn.count() > 0 and await sign_out_btn.first.is_visible():
+        logger.info("Sign Out button already visible in current dialog. Clicking directly...")
+        await sign_out_btn.first.click()
+        await asyncio.sleep(1.0)
+        confirm_btn = page.locator(
+            'div[role="dialog"] button:has-text("Sign Out"), '
+            'div[role="dialog"] button:has-text("Cerrar"), '
+            'div[role="alertdialog"] button:has-text("Sign Out")'
+        )
+        if await confirm_btn.count() > 0:
+            logger.info("Confirming Sign Out modal...")
+            await confirm_btn.first.click()
+            await asyncio.sleep(1.0)
+        return True
+
+    # Navigate to Account tab
     if not await navigate_settings_tab(page, "Account"):
+        # If navigation returned False, check if sign out button or sign in is visible anyway
+        if await sign_out_btn.count() > 0 and await sign_out_btn.first.is_visible():
+            await sign_out_btn.first.click()
+            await asyncio.sleep(1.0)
+            return True
+        if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
+            return True
         logger.error("Failed to navigate to Account settings tab.")
         return False
         
@@ -68,8 +110,11 @@ async def sign_out(page: Page) -> bool:
     
     # Locate Sign Out button
     sign_out_btn = page.locator('button:has-text("Sign Out"), button:has-text("Cerrar sesión")')
-    if await sign_out_btn.count() == 0:
-        logger.error("Sign Out button not found in Account settings.")
+    if await sign_out_btn.count() == 0 or not await sign_out_btn.first.is_visible():
+        if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
+            logger.info("Settings dialog displays 'Sign In'. Already signed out.")
+            return True
+        logger.error("Sign Out button not visible in Account settings.")
         return False
         
     logger.info("Clicking Sign Out button...")
@@ -229,9 +274,17 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         logger.info(f"Determined target account: {chosen_target}")
     target_email = chosen_target
     
-    # 3. Sign Out
-    if not await sign_out(page):
-        raise RuntimeError("Failed to execute Sign Out in Antigravity.")
+    # 3. Sign Out (skipped if already in onboarding or signed-out state)
+    is_already_onboarding = "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button, button:has-text("Continue with Google")').count() > 0)
+    if is_already_onboarding:
+        logger.info("Antigravity is already in signed-out state (/onboarding visible). Proceeding directly to sign in.")
+    else:
+        if not await sign_out(page):
+            # Check if sign_out resulted in reaching /onboarding anyway
+            if "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button').count() > 0):
+                logger.info("Sign out transition led to onboarding state. Proceeding.")
+            else:
+                raise RuntimeError("Failed to execute Sign Out in Antigravity.")
         
     await asyncio.sleep(1.2)
     
