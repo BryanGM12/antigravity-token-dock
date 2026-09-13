@@ -10,7 +10,8 @@ import json
 import logging
 import threading
 import subprocess
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger("LocalHUD")
@@ -483,6 +484,18 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
 </html>
 """
 
+_cached_health_audit: Optional[Dict[str, Any]] = None
+_last_health_audit_time: float = 0.0
+
+def get_cached_health_audit(ttl_sec: float = 15.0) -> Dict[str, Any]:
+    """Caches health audit results for ttl_sec to prevent hammering CDP and system processes."""
+    global _cached_health_audit, _last_health_audit_time
+    now = time.time()
+    if _cached_health_audit is None or (now - _last_health_audit_time) > ttl_sec:
+        _cached_health_audit = run_health_audit()
+        _last_health_audit_time = now
+    return _cached_health_audit
+
 def get_hud_status_payload() -> Dict[str, Any]:
     """Compiles the aggregate status payload for the HUD and API."""
     mem = load_memory()
@@ -496,7 +509,7 @@ def get_hud_status_payload() -> Dict[str, Any]:
     history = load_analytics_data()
     burn["total_rotations"] = history.get("total_rotations", 0)
     
-    audit = run_health_audit()
+    audit = get_cached_health_audit(ttl_sec=15.0)
     
     return {
         "active_account": active,
@@ -530,7 +543,7 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/switch":
             logger.info("Manual switch triggered via Local HUD API!")
             switch_script = os.path.join(SCRIPT_DIR, "daemon_service.py")
-            subprocess.Popen(["python.exe", switch_script, "--switch-now"])
+            subprocess.Popen([sys.executable, switch_script, "--switch-now"])
             
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -575,9 +588,12 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
         # Silence default stderr logging to keep console clean
         pass
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
 def start_hud_server(port: int = HUD_PORT):
-    """Starts the HUD server on localhost."""
-    server = HTTPServer(("127.0.0.1", port), HUDRequestHandler)
+    """Starts the multi-threaded HUD server on localhost."""
+    server = ReusableThreadingHTTPServer(("127.0.0.1", port), HUDRequestHandler)
     logger.info(f"Local HUD server running at http://127.0.0.1:{port}")
     server.serve_forever()
 

@@ -11,13 +11,21 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 PORT_FILE = os.path.expandvars(r"%APPDATA%\Antigravity\DevToolsActivePort")
 
-def get_cdp_port() -> int:
-    """Reads the active remote debugging port from Antigravity user data."""
-    if not os.path.exists(PORT_FILE):
-        raise FileNotFoundError(f"Antigravity DevToolsActivePort not found at {PORT_FILE}. Is Antigravity running?")
-    with open(PORT_FILE, "r", encoding="utf-8") as f:
-        port_str = f.readline().strip()
-    return int(port_str)
+def get_cdp_port(retries: int = 5, retry_delay: float = 0.5) -> int:
+    """Reads the active remote debugging port from Antigravity user data with retry tolerance."""
+    import time
+    for attempt in range(retries):
+        if os.path.exists(PORT_FILE):
+            try:
+                with open(PORT_FILE, "r", encoding="utf-8") as f:
+                    port_str = f.readline().strip()
+                if port_str and port_str.isdigit():
+                    return int(port_str)
+            except Exception:
+                pass
+        time.sleep(retry_delay)
+
+    raise FileNotFoundError(f"Antigravity DevToolsActivePort not found or invalid at {PORT_FILE}. Is Antigravity running?")
 
 async def connect_antigravity(playwright_instance) -> Tuple[Browser, Page]:
     """Connects to the active Antigravity instance over CDP and returns (browser, main_page)."""
@@ -32,18 +40,49 @@ async def connect_antigravity(playwright_instance) -> Tuple[Browser, Page]:
     # Find the main Antigravity webview/page
     target_page = None
     for p in ctx.pages:
-        url = p.url
-        if "127.0.0.1" in url and "/c/" in url or "section=" in url:
-            target_page = p
-            break
+        if not p.is_closed():
+            url = p.url or ""
+            if "127.0.0.1" in url and ("/c/" in url or "section=" in url or "/onboarding" in url):
+                target_page = p
+                break
             
     if not target_page:
-        if ctx.pages:
-            target_page = ctx.pages[0]
-        else:
-            raise RuntimeError("No active pages found in Antigravity context.")
+        for p in ctx.pages:
+            if not p.is_closed():
+                target_page = p
+                break
+
+    if not target_page:
+        raise RuntimeError("No active living pages found in Antigravity context.")
             
     return browser, target_page
+
+async def ensure_active_page(browser: Browser, current_page: Optional[Page] = None) -> Page:
+    """
+    Guarantees returning a living, non-closed Antigravity Page.
+    Recovers seamlessly if the page reloaded, closed, or switched during OAuth.
+    """
+    if current_page and not current_page.is_closed():
+        try:
+            await current_page.evaluate("1 + 1")
+            return current_page
+        except Exception:
+            pass
+
+    if not browser.is_connected():
+        raise RuntimeError("Antigravity CDP browser connection dropped.")
+
+    for ctx in browser.contexts:
+        for p in ctx.pages:
+            if not p.is_closed():
+                url = p.url or ""
+                if "127.0.0.1" in url and ("/c/" in url or "section=" in url or "/onboarding" in url):
+                    return p
+        for p in ctx.pages:
+            if not p.is_closed():
+                return p
+
+    raise RuntimeError("No active living page available in Antigravity context.")
 
 async def get_active_conversation_id(page: Page) -> Optional[str]:
     """Extracts the conversation UUID from current page URL, breadcrumbs, or sidebar."""
@@ -93,7 +132,7 @@ async def get_active_conversation_id(page: Page) -> Optional[str]:
 async def open_settings(page: Page) -> bool:
     """Opens the Settings dialog if not already open."""
     dialog = page.locator('div[role="dialog"]')
-    if await dialog.count() > 0 and await dialog.is_visible():
+    if await dialog.count() > 0 and await dialog.first.is_visible():
         return True
         
     settings_btn = page.locator('[data-testid="settings-button"], button[aria-label="Settings"], button:has-text("Settings")')
@@ -121,11 +160,11 @@ async def close_settings(page: Page) -> bool:
     if await dialog.count() > 0:
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.3)
-        if await dialog.count() > 0 and await dialog.is_visible():
+        if await dialog.count() > 0 and await dialog.first.is_visible():
             # Try clicking close button or pressing Escape again
             close_btn = page.locator('div[role="dialog"] button[aria-label="Close"], div[role="dialog"] button:has-text("✕")')
-            if await close_btn.count() > 0:
-                await close_btn.first.click()
+            if await close_btn.count() > 0 and await close_btn.first.is_visible():
+                await close_btn.first.click(force=True)
             else:
                 await page.keyboard.press("Escape")
         await asyncio.sleep(0.3)
@@ -212,29 +251,34 @@ async def get_current_logged_in_email(page: Page, close_after: bool = True) -> O
     """Returns the currently authenticated email, checking React context first, then Account settings."""
     try:
         direct_email = await page.evaluate(r'''async () => {
-            const allEls = document.querySelectorAll('*');
-            let core = null;
-            for (const el of allEls) {
-                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
-                if (!key) continue;
-                let cur = el[key];
-                while (cur) {
-                    if (cur.memoizedProps?.value?.core) {
-                        core = cur.memoizedProps.value.core;
-                        break;
+            let core = window.__antigravityCore;
+            if (!core) {
+                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                for (const el of candidates) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let cur = el[key];
+                    while (cur) {
+                        if (cur.memoizedProps?.value?.core?.authService) {
+                            core = cur.memoizedProps.value.core;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        cur = cur.return;
                     }
-                    cur = cur.return;
+                    if (core) break;
                 }
-                if (core) break;
             }
             if (core?.authService?._lsClient?.getUserStatus) {
                 try {
                     const st = await core.authService._lsClient.getUserStatus({});
-                    return st?.userStatus?.email || null;
-                } catch (e) {
-                    return null;
-                }
+                    if (st?.userStatus?.email) return st.userStatus.email;
+                } catch (e) {}
             }
+            try {
+                const ctx = core?.authService?.authStateProvider?.getState?.()?.context;
+                if (ctx?.userEmail) return ctx.userEmail;
+            } catch (e) {}
             return null;
         }''')
         if direct_email and "@" in direct_email:

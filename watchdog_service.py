@@ -117,7 +117,17 @@ def cleanup_orphan_comet_auth_tabs() -> int:
             if close_browser_tab:
                 close_browser_tab(hwnd)
             else:
-                user32.PostMessageW(hwnd, 0x0010, 0, 0)
+                # Safe fallback: send Ctrl+W directly, NEVER send WM_CLOSE
+                VK_CONTROL = 0x11
+                VK_W = ord('W')
+                KEYEVENTF_KEYUP = 0x0002
+                user32.SetForegroundWindow(hwnd)
+                time.sleep(0.04)
+                user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                user32.keybd_event(VK_W, 0, 0, 0)
+                time.sleep(0.04)
+                user32.keybd_event(VK_W, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
             closed_count += 1
             time.sleep(0.1)
         except Exception as e:

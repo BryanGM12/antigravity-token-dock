@@ -16,7 +16,8 @@ from antigravity_bridge import (
     close_settings,
     navigate_settings_tab,
     get_current_logged_in_email,
-    get_active_conversation_id
+    get_active_conversation_id,
+    ensure_active_page
 )
 from quota_detector import get_quota_limits
 from external_oauth_handler import handle_external_google_signin
@@ -57,101 +58,185 @@ def determine_target_account(current_email: str) -> str:
         f"Current email '{current_email}' is not in authorized list ({sorted(list(AUTHORIZED_ACCOUNTS))}). Aborting."
     )
 
+async def programmatic_sign_out(page: Page) -> bool:
+    """Attempts direct programmatic logout via React Fiber core.authService."""
+    try:
+        res = await page.evaluate(r'''async () => {
+            let core = window.__antigravityCore;
+            if (!core) {
+                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                for (const el of candidates) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let cur = el[key];
+                    while (cur) {
+                        if (cur.memoizedProps?.value?.core?.authService) {
+                            core = cur.memoizedProps.value.core;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        cur = cur.return;
+                    }
+                    if (core) break;
+                }
+            }
+            if (core?.authService?.logout) {
+                await core.authService.logout();
+                return true;
+            }
+            return false;
+        }''')
+        return bool(res)
+    except Exception as e:
+        logger.debug(f"Programmatic sign out evaluation failed: {e}")
+        return False
+
 async def sign_out(page: Page) -> bool:
-    """Navigates to Account settings and executes Sign Out."""
-    logger.info("Checking sign out state / opening Account settings...")
+    """
+    Executes Sign Out in Antigravity using dual-engine architecture:
+    1. Primary: Direct programmatic core.authService.logout() with active state verification.
+    2. Fallback: Calibrated DOM navigation with alertdialog priority and strict mode safety.
+    """
+    logger.info("Executing Sign Out in Antigravity...")
     
-    # Check if already on /onboarding or sign in page
-    if "/onboarding" in page.url:
-        logger.info("Antigravity is already on /onboarding page. Sign out is already complete.")
+    # Check if already in signed-out state
+    if "/onboarding" in (page.url or ""):
+        logger.info("Antigravity is already on /onboarding page. Sign out already complete.")
         return True
         
     entrance_btn = page.locator('.entrance-auth-panel button, button:has-text("Continue with Google")')
     if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
-        logger.info("Antigravity onboarding entrance is already visible. Sign out is already complete.")
+        logger.info("Antigravity onboarding entrance is already visible. Sign out already complete.")
         return True
-        
-    # Check if Settings dialog is already open and shows Sign In
+
+    # 1. Primary Engine: Fast Programmatic Logout
+    if await programmatic_sign_out(page):
+        logger.info("Programmatic logout dispatched. Verifying signed-out transition...")
+        for _ in range(12):
+            await asyncio.sleep(0.3)
+            if not await is_authenticated_in_dom(page) or "/onboarding" in (page.url or ""):
+                logger.info("Verified sign-out state via authService state machine.")
+                return True
+            if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
+                return True
+        logger.warning("Programmatic logout dispatched but state did not flip within 3.6s; falling back to UI.")
+
+    # 2. Fallback Engine: UI Dialog & Modal Handling
     dialog_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
     if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
-        logger.info("Settings dialog is already open and shows 'Sign In'. User is already signed out.")
+        logger.info("Settings dialog is open and displays 'Sign In'. User is already signed out.")
         return True
 
-    # Check if Sign Out button is ALREADY visible right now in open dialog
     sign_out_btn = page.locator('div[role="dialog"] button:has-text("Sign Out"), div[role="dialog"] button:has-text("Cerrar sesión")')
     if await sign_out_btn.count() > 0 and await sign_out_btn.first.is_visible():
-        logger.info("Sign Out button already visible in current dialog. Clicking directly...")
-        await sign_out_btn.first.click()
-        await asyncio.sleep(1.0)
-        confirm_btn = page.locator(
-            'div[role="dialog"] button:has-text("Sign Out"), '
-            'div[role="dialog"] button:has-text("Cerrar"), '
-            'div[role="alertdialog"] button:has-text("Sign Out")'
-        )
-        if await confirm_btn.count() > 0:
-            logger.info("Confirming Sign Out modal...")
-            await confirm_btn.first.click()
-            await asyncio.sleep(1.0)
-        return True
-
-    # Navigate to Account tab
-    if not await navigate_settings_tab(page, "Account"):
-        # If navigation returned False, check if sign out button or sign in is visible anyway
+        logger.info("Sign Out button already visible in current dialog. Clicking...")
+        await sign_out_btn.first.click(force=True)
+    else:
+        if not await navigate_settings_tab(page, "Account"):
+            if await sign_out_btn.count() > 0 and await sign_out_btn.first.is_visible():
+                await sign_out_btn.first.click(force=True)
+            elif await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
+                return True
+            else:
+                logger.error("Failed to navigate to Account settings tab.")
+                return False
+                
+        await asyncio.sleep(0.4)
+        sign_out_btn = page.locator('div[role="dialog"] button:has-text("Sign Out"), div[role="dialog"] button:has-text("Cerrar sesión")')
         if await sign_out_btn.count() > 0 and await sign_out_btn.first.is_visible():
-            await sign_out_btn.first.click()
-            await asyncio.sleep(1.0)
-            return True
-        if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
-            return True
-        logger.error("Failed to navigate to Account settings tab.")
-        return False
-        
+            logger.info("Clicking Sign Out button in Account tab...")
+            await sign_out_btn.first.click(force=True)
+        else:
+            if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
+                return True
+            logger.error("Sign Out button not visible in Account settings.")
+            return False
+
+    # Wait for confirmation modal (prioritizing alertdialog over dialog)
     await asyncio.sleep(0.5)
-    
-    # Locate Sign Out button
-    sign_out_btn = page.locator('button:has-text("Sign Out"), button:has-text("Cerrar sesión")')
-    if await sign_out_btn.count() == 0 or not await sign_out_btn.first.is_visible():
-        if await dialog_sign_in.count() > 0 and await dialog_sign_in.first.is_visible():
-            logger.info("Settings dialog displays 'Sign In'. Already signed out.")
+    confirm_locators = [
+        'div[role="alertdialog"] button:has-text("Sign Out")',
+        'div[role="alertdialog"] button:has-text("Sign out")',
+        'div[role="alertdialog"] button:has-text("Cerrar sesión")',
+        'div[role="alertdialog"] button:has-text("Confirm")',
+        'div[role="alertdialog"] button.bg-destructive',
+        'div[role="dialog"]:not(:has(nav)) button:has-text("Sign Out")'
+    ]
+    for sel in confirm_locators:
+        c_btn = page.locator(sel)
+        if await c_btn.count() > 0 and await c_btn.first.is_visible():
+            logger.info(f"Confirming Sign Out modal with selector: {sel}...")
+            await c_btn.first.click(force=True)
+            break
+
+    # Verify sign out completed
+    for _ in range(15):
+        await asyncio.sleep(0.3)
+        if "/onboarding" in (page.url or "") or not await is_authenticated_in_dom(page):
+            logger.info("Sign out successfully verified.")
             return True
-        logger.error("Sign Out button not visible in Account settings.")
-        return False
-        
-    logger.info("Clicking Sign Out button...")
-    await sign_out_btn.first.click()
-    await asyncio.sleep(1.0)
-    
-    # Check if a confirmation modal appeared
-    confirm_btn = page.locator(
-        'div[role="dialog"] button:has-text("Sign Out"), '
-        'div[role="dialog"] button:has-text("Cerrar"), '
-        'div[role="alertdialog"] button:has-text("Sign Out")'
-    )
-    if await confirm_btn.count() > 0:
-        logger.info("Confirming Sign Out modal...")
-        await confirm_btn.first.click()
-        await asyncio.sleep(1.0)
-        
+        if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
+            return True
+            
     return True
 
 async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
     """
-    Triggers Google Sign-In:
-    1. If Settings dialog has 'Sign In' button, clicks it (which navigates to /onboarding?login=true).
-    2. On /onboarding, clicks 'Continue with Google' (.entrance-auth-panel button).
-    3. Programmatic fallback invokes core.authService.loginWithRedirect({isGcpTos: false}) directly.
+    Triggers Google Sign-In with zero-delay programmatic acceleration:
+    1. Primary: Direct invocation of core.authService.loginWithRedirect({ isGcpTos: false }).
+    2. Fallback: Fast UI interaction on /onboarding or Settings dialog.
     """
-    logger.info("Waiting for sign-in controls to initiate Google OAuth...")
+    logger.info("Triggering Google Sign-In flow...")
+
+    # Primary: Fast programmatic trigger
+    try:
+        triggered = await page.evaluate(r'''async () => {
+            let core = window.__antigravityCore;
+            if (!core) {
+                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                for (const el of candidates) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let cur = el[key];
+                    while (cur) {
+                        if (cur.memoizedProps?.value?.core?.authService) {
+                            core = cur.memoizedProps.value.core;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        cur = cur.return;
+                    }
+                    if (core) break;
+                }
+            }
+            if (core?.authService?.loginWithRedirect) {
+                await core.authService.loginWithRedirect({ isGcpTos: false });
+                return true;
+            }
+            return false;
+        }''')
+        if triggered:
+            logger.info("Direct core.authService.loginWithRedirect triggered successfully!")
+            return True
+    except Exception as e:
+        logger.debug(f"Direct programmatic login trigger failed: {e}")
+
+    # Fallback UI polling
     start = time.time()
-    
     while time.time() - start < timeout_sec:
-        # Check if Settings dialog has 'Sign In' button
-        settings_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
-        if await settings_sign_in.count() > 0 and await settings_sign_in.first.is_visible():
-            logger.info("Found 'Sign In' button in Settings dialog. Clicking...")
-            await settings_sign_in.first.click()
-            await asyncio.sleep(1.0)
-            
+        # Check if settings dialog is open; if it has Sign In, click it, else close it so it doesn't obstruct /onboarding
+        dialog = page.locator('div[role="dialog"]')
+        if await dialog.count() > 0 and await dialog.first.is_visible():
+            settings_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
+            if await settings_sign_in.count() > 0 and await settings_sign_in.first.is_visible():
+                logger.info("Found 'Sign In' button in Settings dialog. Clicking...")
+                await settings_sign_in.first.click(force=True)
+                await asyncio.sleep(0.5)
+            else:
+                # Close settings to uncover onboarding screen
+                await close_settings(page)
+                await asyncio.sleep(0.3)
+
         # Check for 'Continue with Google' button on onboarding page
         onboarding_btn = page.locator(
             'button:has-text("Continue with Google"), '
@@ -160,7 +245,7 @@ async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
         )
         if await onboarding_btn.count() > 0 and await onboarding_btn.first.is_visible():
             logger.info("Found 'Continue with Google' button. Clicking...")
-            await onboarding_btn.first.click()
+            await onboarding_btn.first.click(force=True)
             return True
             
         # General selectors fallback
@@ -174,37 +259,11 @@ async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
             btn = page.locator(sel)
             if await btn.count() > 0 and await btn.first.is_visible():
                 logger.info(f"Found sign-in button with selector: {sel}. Clicking...")
-                await btn.first.click()
+                await btn.first.click(force=True)
                 return True
                 
-        await asyncio.sleep(0.5)
-        
-    # Programmatic fallback via core.authService
-    logger.info("Attempting programmatic authService.loginWithRedirect fallback...")
-    try:
-        res = await page.evaluate(r'''async () => {
-            const allEls = document.querySelectorAll('*');
-            for (const el of allEls) {
-                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
-                if (!key) continue;
-                let cur = el[key];
-                while (cur) {
-                    if (cur.memoizedProps?.value?.core?.authService) {
-                        const auth = cur.memoizedProps.value.core.authService;
-                        await auth.loginWithRedirect({ isGcpTos: false });
-                        return true;
-                    }
-                    cur = cur.return;
-                }
-            }
-            return false;
-        }''')
-        if res:
-            logger.info("Programmatic authService.loginWithRedirect dispatched successfully!")
-            return True
-    except Exception as e:
-        logger.warning(f"Programmatic login fallback failed: {e}")
-        
+        await asyncio.sleep(0.4)
+
     logger.warning("Sign in button did not appear within timeout.")
     return False
 
@@ -212,18 +271,29 @@ async def is_authenticated_in_dom(page: Page) -> bool:
     """Checks whether the application core authService state is 'signedIn'."""
     try:
         state = await page.evaluate(r'''() => {
-            const allEls = document.querySelectorAll('*');
-            for (const el of allEls) {
-                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
-                if (!key) continue;
-                let cur = el[key];
-                while (cur) {
-                    if (cur.memoizedProps?.value?.core?.authService) {
-                        const auth = cur.memoizedProps.value.core.authService;
-                        return auth?.authStateProvider?.getState?.()?.state;
+            let core = window.__antigravityCore;
+            if (!core) {
+                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                for (const el of candidates) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let cur = el[key];
+                    while (cur) {
+                        if (cur.memoizedProps?.value?.core?.authService) {
+                            core = cur.memoizedProps.value.core;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        cur = cur.return;
                     }
-                    cur = cur.return;
+                    if (core) break;
                 }
+            }
+            if (core?.authService) {
+                const s1 = core.authService.authStateProvider?.getState?.()?.state;
+                if (s1) return s1;
+                const s2 = core.authService._authActor?.getSnapshot?.()?.value;
+                if (s2) return s2;
             }
             return null;
         }''')
@@ -311,10 +381,17 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     if not oauth_handled:
         logger.warning("External OAuth handler did not confirm success; checking Antigravity state...")
         
-    # 6. Wait for Antigravity workbench to re-authenticate (fast polling)
+    # 6. Wait for Antigravity workbench to re-authenticate (fast polling with living page guard)
     logger.info("Waiting for Antigravity workbench to confirm signedIn state...")
     authenticated = False
-    for _ in range(25):
+    browser = getattr(getattr(page, "context", None), "browser", None)
+
+    for _ in range(30):
+        if browser and browser.is_connected():
+            try:
+                page = await ensure_active_page(browser, page)
+            except Exception:
+                pass
         if await is_authenticated_in_dom(page):
             authenticated = True
             break
@@ -324,9 +401,14 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     
     # 7. Verify new account email (fast polling)
     new_email = None
-    for _ in range(12):
+    for _ in range(15):
+        if browser and browser.is_connected():
+            try:
+                page = await ensure_active_page(browser, page)
+            except Exception:
+                pass
         try:
-            new_email = await get_current_logged_in_email(page)
+            new_email = await get_current_logged_in_email(page, close_after=False)
             if new_email and target_email.split("@")[0].lower() in new_email.lower():
                 break
         except Exception:

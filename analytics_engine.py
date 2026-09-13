@@ -18,28 +18,23 @@ os.makedirs(STATE_DIR, exist_ok=True)
 
 MAX_HISTORY_SAMPLES = 200
 
-def load_analytics_data() -> Dict[str, Any]:
-    """Loads analytics history and cycle stats from disk."""
-    if os.path.exists(ANALYTICS_FILE):
-        try:
-            with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not load analytics file: {e}")
-            
+def _default_analytics_factory() -> Dict[str, Any]:
     return {
         "updated_at": None,
         "total_rotations": 0,
         "samples": []
     }
 
+def load_analytics_data() -> Dict[str, Any]:
+    """Loads analytics history and cycle stats from disk with retry tolerance and corrupt recovery."""
+    from atomic_state import SafeJsonStore
+    return SafeJsonStore.load_json(ANALYTICS_FILE, _default_analytics_factory)
+
 def save_analytics_data(data: Dict[str, Any]):
-    """Saves analytics data atomically to disk."""
+    """Saves analytics data atomically to disk with unique temp file and Windows retry."""
+    from atomic_state import SafeJsonStore
     data["updated_at"] = datetime.now().isoformat()
-    temp = ANALYTICS_FILE + ".tmp"
-    with open(temp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(temp, ANALYTICS_FILE)
+    SafeJsonStore.save_json(ANALYTICS_FILE, data)
 
 def record_usage_sample(account: str, five_hour_pct: Optional[int], weekly_pct: Optional[int]) -> Dict[str, Any]:
     """Records a new timestamped quota sample for burn-rate calculations."""

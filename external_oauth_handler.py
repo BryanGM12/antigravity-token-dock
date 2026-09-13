@@ -116,7 +116,7 @@ def get_browser_windows(target_process_name: Optional[str] = None) -> List[Tuple
     windows: List[Tuple[int, int, str]] = []
 
     def enum_cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+        if not user32.IsWindowVisible(hwnd):
             return True
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -176,19 +176,34 @@ def find_target_oauth_window(
 
     # Case B: Reused window or pre_hwnds was None
     scored = []
-    oauth_keywords = [
-        "Google Antigravity", "antigravity.google", "Auth Success", "Acceso: Cuentas de Google",
-        "Elige una cuenta", "Elegir una cuenta", "Choose an account", "Sign in - Google Accounts",
-        "Sign in", "Iniciar sesión", "Google", "localhost"
+    # Weighted keyword matching: higher weight for high-confidence titles
+    high_prio = ["Google Antigravity", "antigravity.google", "Auth Success"]
+    med_prio = [
+        "Acceso: Cuentas de Google", "Elige una cuenta", "Elegir una cuenta",
+        "Choose an account", "Sign in - Google Accounts", "Sign in", "Iniciar sesión"
     ]
+    low_prio = ["Google", "localhost"]
 
     for hwnd, pid, title in windows:
-        score = 1
-        for kw in oauth_keywords:
-            if kw.lower() in title.lower():
-                score = 10
+        score = 0
+        t_lower = title.lower()
+        for kw in high_prio:
+            if kw.lower() in t_lower:
+                score = 100
                 break
-        scored.append((score, hwnd, title))
+        if score == 0:
+            for kw in med_prio:
+                if kw.lower() in t_lower:
+                    score = 50
+                    break
+        if score == 0:
+            for kw in low_prio:
+                if kw.lower() in t_lower:
+                    score = 20
+                    break
+
+        if score > 0:
+            scored.append((score, hwnd, title))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1] if scored else None
@@ -321,8 +336,8 @@ def get_browser_url(hwnd: int) -> str:
             if url:
                 break
 
-        # Return focus to web contents cleanly via F6
-        send_single_key(hwnd, 0x75)  # VK_F6
+        # Dismiss address bar selection cleanly via Escape
+        send_single_key(hwnd, 0x1B)  # VK_ESCAPE
         time.sleep(0.04)
         return url
     except Exception as e:
@@ -422,10 +437,14 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     viewport_height = max(300, win_h - 125)
     viewport_center_y = viewport_top + (viewport_height // 2)
 
+    idx = get_account_index(target_email)
     row_offset = get_account_row_offset(target_email)
-    row_y = viewport_center_y + row_offset
+    if win_h >= 750:
+        row_y = rect.top + 285 + (idx * 68)
+    else:
+        row_y = viewport_center_y + row_offset
 
-    logger.info(f"Executing calibrated physical click on {target_email} at ({cx}, {row_y}) [offset: {row_offset}px]...")
+    logger.info(f"Executing calibrated physical click on {target_email} (idx={idx}) at ({cx}, {row_y}) [win_h={win_h}]...")
     physical_click(cx, row_y)
     time.sleep(0.8)
     return True

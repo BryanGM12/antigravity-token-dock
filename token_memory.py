@@ -94,25 +94,20 @@ def _init_empty_account_record() -> Dict[str, Any]:
         "is_exhausted": False
     }
 
+def _default_memory_factory() -> Dict[str, Any]:
+    return {
+        "updated_at": None,
+        "active_account": None,
+        "auto_switch_enabled": True,
+        "pinned_account": None,
+        "sound_enabled": True,
+        "accounts": {}
+    }
+
 def load_memory() -> Dict[str, Any]:
-    """Loads persistent account memory from disk or returns initialized template."""
-    data = None
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to read token memory file: {e}")
-            
-    if not data or not isinstance(data, dict):
-        data = {
-            "updated_at": None,
-            "active_account": None,
-            "auto_switch_enabled": True,
-            "pinned_account": None,
-            "sound_enabled": True,
-            "accounts": {}
-        }
+    """Loads token memory persistently from disk with corrupt recovery and retry tolerance."""
+    from atomic_state import SafeJsonStore
+    data = SafeJsonStore.load_json(MEMORY_FILE, _default_memory_factory)
         
     if "accounts" not in data:
         data["accounts"] = {}
@@ -123,7 +118,7 @@ def load_memory() -> Dict[str, Any]:
     if "sound_enabled" not in data:
         data["sound_enabled"] = True
         
-    # Ensure all 3 default accounts exist
+    # Ensure all default accounts exist
     for acc in DEFAULT_ACCOUNTS:
         if acc not in data["accounts"]:
             data["accounts"][acc] = _init_empty_account_record()
@@ -146,12 +141,10 @@ def load_memory() -> Dict[str, Any]:
     return data
 
 def save_memory(data: Dict[str, Any]):
-    """Saves memory atomically to disk."""
+    """Saves memory atomically to disk with unique temp file and Windows WinError 32 retry."""
+    from atomic_state import SafeJsonStore
     data["updated_at"] = datetime.now().isoformat()
-    temp_file = MEMORY_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(temp_file, MEMORY_FILE)
+    SafeJsonStore.save_json(MEMORY_FILE, data)
 
 def update_account_snapshot(
     email: str,

@@ -29,9 +29,11 @@ from analytics_engine import calculate_burn_rate, record_usage_sample, load_anal
 from watchdog_service import run_health_audit, ensure_dark_theme
 from goal_resumer import analyze_chat_state
 from notification_service import send_windows_toast
+from circuit_breaker import RotationCircuitBreaker
+from atomic_state import SafeJsonStore
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (19 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (21 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -142,7 +144,45 @@ async def run_all_tests():
         assert hud_payload.get("active_account") is not None, "El HUD debe reportar la cuenta activa"
         assert len(hud_payload.get("accounts", {})) == 4, "El HUD debe monitorear las 4 cuentas"
         
-    print("\n--- TODOS LOS 19 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 20. Circuit Breaker Engine Verification
+    cb = RotationCircuitBreaker(failure_threshold=3, base_cooldown_sec=10.0, max_cooldown_sec=60.0)
+    can_att, _, _ = cb.can_attempt()
+    assert can_att, "El circuito debe comenzar en CLOSED"
+    cb.record_failure("test failure 1")
+    cb.record_failure("test failure 2")
+    assert cb.state == "CLOSED", "El circuito debe continuar en CLOSED con menos de 3 fallos"
+    cb.record_failure("test failure 3")
+    assert cb.state == "OPEN", "El circuito debe abrirse tras 3 fallos consecutivos"
+    can_att_open, reason_open, wait_open = cb.can_attempt()
+    assert not can_att_open, "El circuito OPEN debe bloquear intentos"
+    cb.record_success()
+    assert cb.state == "CLOSED", "record_success debe restaurar el circuito a CLOSED"
+    print("[PASS] 20. RotationCircuitBreaker verificado: Transiciones CLOSED -> OPEN -> CLOSED y backoff operativo.")
+
+    # 21. SafeJsonStore Atomic Concurrency Verification
+    import tempfile
+    test_json_path = os.path.join(tempfile.gettempdir(), f"test_atomic_store_{os.getpid()}.json")
+    store = SafeJsonStore(test_json_path, default_factory=dict)
+    try:
+        store.write({"test_key": "atomic_val", "pid": os.getpid()})
+        read_back = store.read()
+        assert read_back.get("test_key") == "atomic_val", "Debe leer el valor escrito atomicamente"
+        print(f"[PASS] 21. SafeJsonStore persistencia atomica verificada: Escritura segura y lectura OK.")
+    finally:
+        if os.path.exists(test_json_path):
+            try:
+                os.remove(test_json_path)
+            except Exception:
+                pass
+        bak_file = test_json_path + ".bak"
+        if os.path.exists(bak_file):
+            try:
+                os.remove(bak_file)
+            except Exception:
+                pass
+
+    print("\n--- TODOS LOS 21 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
+    import os
     asyncio.run(run_all_tests())
