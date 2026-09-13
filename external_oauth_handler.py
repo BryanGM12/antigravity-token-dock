@@ -374,14 +374,55 @@ def physical_click(x: int, y: int):
     time.sleep(0.06)
 
 def focus_web_contents_safely(hwnd: int):
-    """Clicks in empty margin on far left to safely focus document without clicking buttons."""
+    """Clicks in empty margin on far right to safely focus document without clicking buttons or left sidebars (Comet/Arc)."""
     switch_to_interactive_desktop()
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-        safe_x = rect.left + 50
-        safe_y = rect.top + 200
+        win_w = rect.right - rect.left
+        win_h = rect.bottom - rect.top
+        # Click safely in the right margin of the web contents (avoids left sidebars completely)
+        safe_x = max(rect.left + 200, rect.right - 80)
+        safe_y = rect.top + min(240, max(180, win_h // 3))
         physical_click(safe_x, safe_y)
         time.sleep(0.08)
+
+def select_account_via_uiautomation(hwnd: int, target_email: str) -> bool:
+    """Finds and clicks the target account row directly via Windows UI Automation Accessible tree."""
+    try:
+        import uiautomation as auto
+        switch_to_interactive_desktop()
+        window = auto.ControlFromHandle(hwnd)
+        if not window.Exists(0, 0):
+            return False
+
+        norm_email = target_email.strip().lower()
+        user_part = norm_email.split("@")[0]
+
+        # Search for control containing target email or user prefix
+        for ctrl, _ in auto.WalkTree(window, maxDepth=14):
+            cname = (ctrl.Name or "").lower()
+            if norm_email in cname or user_part in cname:
+                logger.info(f"[UIA] Encontrado control de cuenta para {target_email}: '{ctrl.Name}' ({ctrl.ControlTypeName})")
+                try:
+                    inv = ctrl.GetInvokePattern()
+                    if inv:
+                        inv.Invoke()
+                        time.sleep(0.6)
+                        return True
+                except Exception:
+                    pass
+
+                r = ctrl.BoundingRectangle
+                if r and (r.right - r.left) > 0 and (r.bottom - r.top) > 0:
+                    cx = r.left + (r.right - r.left) // 2
+                    cy = r.top + (r.bottom - r.top) // 2
+                    logger.info(f"[UIA] Clic directo en centro de cuenta: ({cx}, {cy})")
+                    physical_click(cx, cy)
+                    time.sleep(0.6)
+                    return True
+    except Exception as e:
+        logger.debug(f"[UIA] Búsqueda UIAutomation de cuenta no completada: {e}")
+    return False
 
 def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
     """Deterministic Tab navigation fallback for Google Account Chooser screen."""
@@ -415,6 +456,76 @@ def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
     time.sleep(0.08)
     send_single_key(hwnd, 0x0D)  # VK_RETURN
     time.sleep(0.8)
+    return True
+
+def confirm_consent_screen(hwnd: int) -> bool:
+    """Confirms Google OAuth consent screen using UI Automation, smart checkboxes, and fallback clicks."""
+    switch_to_interactive_desktop()
+    activate_browser_window(hwnd)
+    time.sleep(0.08)
+
+    # 1. UI Automation Button Search
+    try:
+        import uiautomation as auto
+        window = auto.ControlFromHandle(hwnd)
+        if window.Exists(0, 0):
+            # Check for any permission checkboxes (e.g. 'Seleccionar todo' or individual scopes)
+            for ctrl, _ in auto.WalkTree(window, maxDepth=14):
+                if ctrl.ControlTypeName == "CheckBoxControl":
+                    cname = (ctrl.Name or "").lower()
+                    if any(w in cname for w in ["seleccionar todo", "select all", "google cloud", "developer"]):
+                        try:
+                            tg = ctrl.GetTogglePattern()
+                            if tg and tg.ToggleState == 0:  # 0 = Off
+                                tg.Toggle()
+                                logger.info(f"[UIA] Activada casilla de permisos: '{ctrl.Name}'")
+                                time.sleep(0.1)
+                        except Exception:
+                            pass
+
+            # Search for primary confirm button
+            target_keywords = ["continuar", "continue", "permitir", "allow", "confirmar", "avanzar"]
+            for ctrl, _ in auto.WalkTree(window, maxDepth=14):
+                if ctrl.ControlTypeName in ["ButtonControl", "HyperlinkControl"]:
+                    cname = (ctrl.Name or "").lower().strip()
+                    if any(cname == kw or kw in cname for kw in target_keywords):
+                        logger.info(f"[UIA] Encontrado botón de confirmación: '{ctrl.Name}'")
+                        try:
+                            inv = ctrl.GetInvokePattern()
+                            if inv:
+                                inv.Invoke()
+                                time.sleep(0.6)
+                                return True
+                        except Exception:
+                            pass
+                        r = ctrl.BoundingRectangle
+                        if r and (r.right - r.left) > 0:
+                            cx = r.left + (r.right - r.left) // 2
+                            cy = r.top + (r.bottom - r.top) // 2
+                            logger.info(f"[UIA] Clic directo en botón '{ctrl.Name}' en ({cx}, {cy})")
+                            physical_click(cx, cy)
+                            time.sleep(0.6)
+                            return True
+    except Exception as e:
+        logger.debug(f"[UIA] Error buscando botón de consentimiento: {e}")
+
+    # 2. Geometric fallback click on 'Continuar' (bottom-right of center card)
+    rect = wintypes.RECT()
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        win_w = rect.right - rect.left
+        win_h = rect.bottom - rect.top
+        cx = rect.left + (win_w // 2)
+        btn_x = cx + 135
+        btn_y = min(rect.top + 520, rect.bottom - 120)
+        logger.info(f"Fallback geometric click on 'Continuar' at ({btn_x}, {btn_y})...")
+        physical_click(btn_x, btn_y)
+        time.sleep(0.3)
+
+    # 3. Keyboard confirmation (Page Down to scroll terms, then Enter)
+    send_single_key(hwnd, 0x22)  # VK_NEXT (Page Down)
+    time.sleep(0.06)
+    send_single_key(hwnd, 0x0D)  # VK_RETURN (Enter)
+    time.sleep(0.5)
     return True
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
@@ -510,15 +621,21 @@ def handle_external_google_signin(
             logger.info("Closed authentication tab cleanly.")
             return True
 
-        # 2. Check URL at controlled intervals (every 0.5s)
+        # 2. Check URL ONLY when needed (avoids focus-stealing Ctrl+L loop)
         now = time.time()
-        if now - last_url_check > 0.5:
+        should_check_url = False
+        if not url_injected and (now - last_url_check > 0.8):
+            should_check_url = True
+        elif (now - last_url_check > 3.5) and not any(w in title for w in ["Google Antigravity Auth Success", "Auth Success"]):
+            should_check_url = True
+
+        if should_check_url:
             last_url_check = now
             cached_url = get_browser_url(hwnd)
 
             if "auth-success" in cached_url or ("localhost:" in cached_url and "code=" in cached_url):
                 logger.info(f"Authentication success detected in URL: {cached_url}")
-                time.sleep(0.5)
+                time.sleep(0.3)
                 close_browser_tab(hwnd)
                 logger.info("Closed authentication tab cleanly.")
                 return True
@@ -531,30 +648,39 @@ def handle_external_google_signin(
                         logger.info(f"Injecting direct OAuth URL with login_hint={target_email}...")
                         inject_url_in_browser(hwnd, direct_url)
                         url_injected = True
-                        time.sleep(0.6)
+                        time.sleep(0.5)
                         continue
 
-        # 3. Handle Account Chooser screen (Fallback if URL injection didn't bypass)
+        # 3. Handle Account Chooser screen
         is_chooser = (
             "accountchooser" in cached_url.lower() or
             "Acceso: Cuentas de Google" in title or
             "Elige una cuenta" in title or
             "Elegir una cuenta" in title or
-            "Choose an account" in title
+            "Choose an account" in title or
+            "Sign in - Google Accounts" in title or
+            "Iniciar sesión" in title
         )
 
-        if is_chooser and selection_attempts < 4:
+        if is_chooser and selection_attempts < 5:
             selection_attempts += 1
-            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/4)...")
+            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
 
-            # Fallback 1: Calibrated centered physical click
+            # Strategy 1: UI Automation direct control resolution (highest precision)
+            if select_account_via_uiautomation(hwnd, target_email):
+                logger.info(f"Selected {target_email} via UI Automation successfully.")
+                time.sleep(0.8)
+                continue
+
+            # Strategy 2: Deterministic calibrated Tab selection (tested and verified)
+            if select_account_via_tabs(hwnd, target_email):
+                logger.info(f"Navigated {target_email} via Tab sequence successfully.")
+                time.sleep(0.8)
+                continue
+
+            # Strategy 3: Calibrated physical click fallback
             select_account_via_centered_click(hwnd, target_email)
-            time.sleep(1.0)
-
-            # Fallback 2: If still on chooser after attempt 1, use deterministic Tab selection
-            if selection_attempts >= 2:
-                select_account_via_tabs(hwnd, target_email)
-                time.sleep(1.2)
+            time.sleep(0.8)
             continue
 
         # 4. Handle Consent / Confirmation prompt ("Continuar", "Allow", "Permitir")
@@ -563,18 +689,17 @@ def handle_external_google_signin(
             "continuar" in title.lower() or
             "allow" in title.lower() or
             "consent" in cached_url.lower() or
-            "approval" in cached_url.lower()
+            "approval" in cached_url.lower() or
+            "solicita acceso" in title.lower() or
+            "wants access" in title.lower()
         )
         if is_consent:
-            logger.info("Detected OAuth consent screen. Confirming...")
-            activate_browser_window(hwnd)
-            time.sleep(0.08)
-            send_single_key(hwnd, 0x09)  # Tab to primary button
-            time.sleep(0.06)
-            send_single_key(hwnd, 0x0D)  # Enter
-            time.sleep(1.0)
+            logger.info("Detected OAuth consent screen. Confirming with multi-strategy engine...")
+            confirm_consent_screen(hwnd)
+            time.sleep(0.8)
+            continue
 
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     logger.warning("External Google Sign-In timed out.")
     return False
