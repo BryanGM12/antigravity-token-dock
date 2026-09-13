@@ -459,12 +459,12 @@ def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
     return True
 
 def confirm_consent_screen(hwnd: int) -> bool:
-    """Confirms Google OAuth consent screen using UI Automation, smart checkboxes, and fallback clicks."""
+    """Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with multi-point clicks and keyboard."""
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.08)
 
-    # 1. UI Automation Button Search
+    # 1. UI Automation Button Search (with 'acceder'!)
     try:
         import uiautomation as auto
         window = auto.ControlFromHandle(hwnd)
@@ -483,8 +483,8 @@ def confirm_consent_screen(hwnd: int) -> bool:
                         except Exception:
                             pass
 
-            # Search for primary confirm button
-            target_keywords = ["continuar", "continue", "permitir", "allow", "confirmar", "avanzar"]
+            # Search for primary confirm button: MUST include 'acceder'!
+            target_keywords = ["acceder", "continuar", "continue", "permitir", "allow", "confirmar", "avanzar", "siguiente", "sign in"]
             for ctrl, _ in auto.WalkTree(window, maxDepth=14):
                 if ctrl.ControlTypeName in ["ButtonControl", "HyperlinkControl"]:
                     cname = (ctrl.Name or "").lower().strip()
@@ -509,27 +509,47 @@ def confirm_consent_screen(hwnd: int) -> bool:
     except Exception as e:
         logger.debug(f"[UIA] Error buscando botón de consentimiento: {e}")
 
-    # 2. Geometric fallback click on 'Continuar' (bottom-right of center card)
+    # 2. Multi-Point Physical Clicks on the 'Acceder' / 'Continuar' column
+    # In Google OAuth, 'Acceder' is the primary action button on the bottom-right of the card.
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         win_w = rect.right - rect.left
         win_h = rect.bottom - rect.top
         cx = rect.left + (win_w // 2)
-        btn_x = cx + 135
-        btn_y = min(rect.top + 520, rect.bottom - 120)
-        logger.info(f"Fallback geometric click on 'Continuar' at ({btn_x}, {btn_y})...")
-        physical_click(btn_x, btn_y)
-        time.sleep(0.3)
+        btn_x = cx + 145  # Center of the right-hand primary button column
 
-    # 3. Keyboard confirmation (Page Down to scroll terms, then Enter)
-    send_single_key(hwnd, 0x22)  # VK_NEXT (Page Down)
-    time.sleep(0.06)
-    send_single_key(hwnd, 0x0D)  # VK_RETURN (Enter)
-    time.sleep(0.5)
+        # Click 'Seleccionar todo' checkbox area just in case permissions require checking
+        checkbox_x = cx - 150
+        checkbox_y = rect.top + 300
+        physical_click(checkbox_x, checkbox_y)
+        time.sleep(0.05)
+
+        # Candidate vertical positions for 'Acceder' / 'Continuar' button:
+        candidate_ys = [
+            rect.top + 660,                   # Standard Google Cloud scopes card
+            rect.top + 540,                   # Short consent card
+            rect.top + 720,                   # Extended scopes card
+            max(rect.top + 400, rect.bottom - 75)  # Bottom of visible viewport if scrolled
+        ]
+
+        for cy in candidate_ys:
+            if cy < rect.bottom:
+                logger.info(f"Targeting 'Acceder' at ({btn_x}, {cy})...")
+                physical_click(btn_x, cy)
+                time.sleep(0.12)
+
+    # 3. Keyboard confirmation
+    # Scroll to bottom to ensure 'Acceder' is in view and interactive
+    send_key_combination(hwnd, 0x11, 0x23)  # Ctrl + End
+    time.sleep(0.08)
+    send_single_key(hwnd, 0x09)  # Tab to focus primary button
+    time.sleep(0.05)
+    send_single_key(hwnd, 0x0D)  # Enter
+    time.sleep(0.3)
     return True
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
-    """Calibrated centered physical click on Google Account Chooser row."""
+    """Calibrated physical click directly on Google Account Chooser row."""
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.08)
@@ -544,20 +564,18 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
         return False
 
     cx = rect.left + (win_w // 2)
-    viewport_top = rect.top + 125
-    viewport_height = max(300, win_h - 125)
-    viewport_center_y = viewport_top + (viewport_height // 2)
-
     idx = get_account_index(target_email)
-    row_offset = get_account_row_offset(target_email)
-    if win_h >= 750:
-        row_y = rect.top + 285 + (idx * 68)
-    else:
-        row_y = viewport_center_y + row_offset
+
+    # In Google Account Chooser:
+    # First row center is at ~ rect.top + 330
+    # Each row is ~ 68px tall
+    row_y = rect.top + 330 + (idx * 68)
 
     logger.info(f"Executing calibrated physical click on {target_email} (idx={idx}) at ({cx}, {row_y}) [win_h={win_h}]...")
     physical_click(cx, row_y)
-    time.sleep(0.8)
+    time.sleep(0.2)
+    physical_click(cx, row_y)  # Double-click to ensure selection if first click only focused
+    time.sleep(0.6)
     return True
 
 def handle_external_google_signin(
@@ -589,6 +607,7 @@ def handle_external_google_signin(
     cached_url = ""
     url_injected = False
     locked_hwnd: Optional[int] = None
+    account_selected = False
 
     while time.time() - start_time < timeout_sec:
         # If locked HWND is still valid and visible, keep using it
@@ -608,6 +627,7 @@ def handle_external_google_signin(
         buff = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buff, length + 1)
         title = buff.value
+        t_lower = title.lower()
 
         # 1. Success verification in title
         if any(w in title for w in [
@@ -616,7 +636,7 @@ def handle_external_google_signin(
             "Auth Success"
         ]):
             logger.info("Authentication success detected in browser window title!")
-            time.sleep(0.5)
+            time.sleep(0.3)
             close_browser_tab(hwnd)
             logger.info("Closed authentication tab cleanly.")
             return True
@@ -651,50 +671,43 @@ def handle_external_google_signin(
                         time.sleep(0.5)
                         continue
 
-        # 3. Handle Account Chooser screen
-        is_chooser = (
+        # 3. Handle Account Chooser vs Consent / Acceder Screen
+        # If title clearly says "Elige una cuenta" or "Choose an account", stay on chooser
+        if "elige una cuenta" in t_lower or "elegir una cuenta" in t_lower or "choose an account" in t_lower:
+            account_selected = False
+
+        is_chooser = not account_selected and (
             "accountchooser" in cached_url.lower() or
-            "Acceso: Cuentas de Google" in title or
-            "Elige una cuenta" in title or
-            "Elegir una cuenta" in title or
-            "Choose an account" in title or
-            "Sign in - Google Accounts" in title or
-            "Iniciar sesión" in title
+            "elige una cuenta" in t_lower or
+            "elegir una cuenta" in t_lower or
+            "choose an account" in t_lower or
+            ("acceso: cuentas de google" in t_lower and selection_attempts == 0)
         )
 
-        if is_chooser and selection_attempts < 5:
+        if is_chooser and selection_attempts < 4:
             selection_attempts += 1
-            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
+            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/4)...")
 
-            # Strategy 1: UI Automation direct control resolution (highest precision)
-            if select_account_via_uiautomation(hwnd, target_email):
-                logger.info(f"Selected {target_email} via UI Automation successfully.")
-                time.sleep(0.8)
-                continue
-
-            # Strategy 2: Deterministic calibrated Tab selection (tested and verified)
-            if select_account_via_tabs(hwnd, target_email):
-                logger.info(f"Navigated {target_email} via Tab sequence successfully.")
-                time.sleep(0.8)
-                continue
-
-            # Strategy 3: Calibrated physical click fallback
+            # Strategy 1: Accurate calibrated physical click directly on account row!
             select_account_via_centered_click(hwnd, target_email)
-            time.sleep(0.8)
+            account_selected = True
+            time.sleep(1.0)
             continue
 
-        # 4. Handle Consent / Confirmation prompt ("Continuar", "Allow", "Permitir")
-        is_consent = (
-            "permitir" in title.lower() or
-            "continuar" in title.lower() or
-            "allow" in title.lower() or
+        # 4. Handle Consent / Confirmation / 'Acceder' Screen
+        is_consent = account_selected or (
+            "acceder" in t_lower or
+            "solicita acceso" in t_lower or
+            "wants access" in t_lower or
+            "permitir" in t_lower or
+            "continuar" in t_lower or
+            "allow" in t_lower or
             "consent" in cached_url.lower() or
-            "approval" in cached_url.lower() or
-            "solicita acceso" in title.lower() or
-            "wants access" in title.lower()
+            "approval" in cached_url.lower()
         )
+
         if is_consent:
-            logger.info("Detected OAuth consent screen. Confirming with multi-strategy engine...")
+            logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
             confirm_consent_screen(hwnd)
             time.sleep(0.8)
             continue
