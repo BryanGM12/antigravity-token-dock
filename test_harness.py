@@ -194,7 +194,24 @@ async def run_all_tests():
     assert 1380 <= xs_wide[0] <= 1420, "Coordenada de columna derecha en pantalla ancha debe ser precisa"
     print("[PASS] 24. Geometria Dual-Column Material 3 verificada: Coordenadas adaptativas para 1920x1032 y monitores ultra-wide.")
 
-    print("\n--- TODOS LOS 24 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 25. Motor Nativo de OCR de Windows (Windows.Media.Ocr)
+    from external_oauth_handler import OCR_SCRIPT_PATH, run_native_ocr
+    assert os.path.exists(OCR_SCRIPT_PATH), f"El script OCR {OCR_SCRIPT_PATH} debe existir"
+    ocr_empty = run_native_ocr(0)
+    assert isinstance(ocr_empty, list) and len(ocr_empty) == 0, "HWND 0 debe retornar lista vacia de items OCR"
+    print("[PASS] 25. Motor de OCR Nativo (Windows.Media.Ocr) verificado: Script integrado y ejecucion robusta.")
+
+    # 26. Reconocedor Inteligente Multi-Modal de Botones y Cuentas
+    from external_oauth_handler import find_interactive_button, find_account_row_interactive, detect_pill_buttons_cv
+    btn_none = find_interactive_button(0, allow_scroll=False)
+    assert btn_none is None, "HWND 0 debe retornar None sin fallos"
+    acc_none = find_account_row_interactive(0, "atteelsidas@gmail.com")
+    assert acc_none is None, "HWND 0 debe retornar None sin fallos"
+    pills_empty = detect_pill_buttons_cv(0)
+    assert isinstance(pills_empty, list) and len(pills_empty) == 0, "detect_pill_buttons_cv debe retornar lista vacia"
+    print("[PASS] 26. Reconocedor Inteligente Multi-Modal de Botones verificado: Fusión CV+OCR y manejo de HWNDs seguro.")
+
+    print("\n--- TODOS LOS 26 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

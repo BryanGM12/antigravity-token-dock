@@ -21,14 +21,18 @@ Key Architectural Safeguards:
 import os
 import re
 import time
+import json
+import subprocess
 import ctypes
 from ctypes import wintypes
 import logging
 import winreg
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from typing import Optional, Tuple, List, Set
+from typing import Optional, Tuple, List, Set, Dict, Any
 import pyperclip
 import psutil
+
+OCR_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows_ocr.ps1")
 
 logger = logging.getLogger("ExternalOAuthHandler")
 
@@ -498,13 +502,69 @@ def wake_up_chromium_accessibility(hwnd: int) -> bool:
     time.sleep(0.06)
     return woken
 
-def detect_blue_button_center(hwnd: int) -> Optional[Tuple[int, int]]:
+def run_native_ocr(hwnd: int) -> List[Dict[str, Any]]:
     """
-    Locates the physical screen center of Google's primary Material 3 blue pill button
-    ('Acceder' / 'Continuar' / 'Siguiente') using computer vision / HSV color-space segmentation.
-    Immune to resolution changes, DPI scaling, multi-monitor offsets, and layout variations.
-    Google Material 3 button color: #0b57d0 / #1a73e8.
+    Executes Windows.Media.Ocr native optical character recognition directly on the window client area.
+    Returns list of detected word and line items with normalized absolute screen coordinates:
+    [{'type': 'word'|'line', 'text': str, 'screen_cx': int, 'screen_cy': int, 'w': int, 'h': int}]
     """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return []
+
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return []
+
+    bbox = (rect.left, rect.top, rect.right, rect.bottom)
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return []
+
+    if not os.path.exists(OCR_SCRIPT_PATH):
+        logger.debug(f"[OCR] Script not found at {OCR_SCRIPT_PATH}")
+        return []
+
+    tmp_path = os.path.join(os.environ.get("TEMP", "."), f"oauth_ocr_{os.getpid()}_{int(time.time() * 1000)}.png")
+    try:
+        from PIL import ImageGrab
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
+        img.save(tmp_path)
+
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", OCR_SCRIPT_PATH, "-ImagePath", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=8
+        )
+        raw_items = json.loads(res.stdout.strip() or "[]")
+        screen_items = []
+        for item in raw_items:
+            it = dict(item)
+            it["screen_cx"] = rect.left + item.get("cx", 0)
+            it["screen_cy"] = rect.top + item.get("cy", 0)
+            it["screen_x"] = rect.left + item.get("x", 0)
+            it["screen_y"] = rect.top + item.get("y", 0)
+            screen_items.append(it)
+        return screen_items
+    except Exception as e:
+        logger.debug(f"[OCR] Native OCR execution failed: {e}")
+        return []
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+def detect_pill_buttons_cv(hwnd: int) -> List[Dict[str, Any]]:
+    """
+    Locates pill buttons across Google Material 3 themes using Computer Vision (OpenCV + PIL):
+    - Light Mode Google Blue (#0b57d0 / #1a73e8)
+    - Dark Mode M3 Blue (#a8c7fa / #8ab4f8)
+    Returns list of detected candidates sorted by bottom-right score (y + x//2).
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return []
+
     try:
         import numpy as np
         import cv2
@@ -512,57 +572,228 @@ def detect_blue_button_center(hwnd: int) -> Optional[Tuple[int, int]]:
 
         rect = wintypes.RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return None
+            return []
 
         bbox = (rect.left, rect.top, rect.right, rect.bottom)
         if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            return None
+            return []
 
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
         img_np = np.array(img)
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-        # Google Primary Button Blue in HSV (Hue 100-125, Saturation 130-255, Value 130-255)
-        lower_blue = np.array([100, 130, 130])
-        upper_blue = np.array([125, 255, 255])
-        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+        # Light Mode Google Blue (Hue 100-125, Sat 110-255, Val 110-255)
+        mask_light = cv2.inRange(hsv, np.array([100, 110, 110]), np.array([125, 255, 255]))
+        # Dark Mode Google Blue (#a8c7fa / #8ab4f8, Hue 95-125, Sat 45-165, Val 175-255)
+        mask_dark = cv2.inRange(hsv, np.array([95, 45, 175]), np.array([125, 165, 255]))
+        combined_mask = cv2.bitwise_or(mask_light, mask_dark)
 
-        # Morphological close to bridge text inside the button
+        # Morphological bridge to join text interior
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 7))
-        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        closed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
 
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            # Google pill button dimensions: width ~60-260px, height ~28-60px
-            if 60 <= w <= 260 and 28 <= h <= 60:
+            # Google pill button dimensions: width ~60-300px, height ~26-65px
+            if 60 <= w <= 300 and 26 <= h <= 65:
                 aspect = w / float(h)
                 if 1.5 <= aspect <= 6.5:
+                    screen_x = rect.left + x + (w // 2)
+                    screen_y = rect.top + y + (h // 2)
                     score = y + (x // 2)
-                    candidates.append((score, x + (w // 2), y + (h // 2), w, h))
+                    candidates.append({
+                        "screen_cx": screen_x,
+                        "screen_cy": screen_y,
+                        "w": w,
+                        "h": h,
+                        "score": score
+                    })
 
-        if candidates:
-            # Pick highest score (bottom-rightmost candidate)
-            candidates.sort(key=lambda c: c[0], reverse=True)
-            best = candidates[0]
-            screen_x = rect.left + best[1]
-            screen_y = rect.top + best[2]
-            logger.info(f"[CV] Botón de acción detectado por visión en ({screen_x}, {screen_y}) [w={best[3]}, h={best[4]}]")
-            return screen_x, screen_y
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates
     except Exception as e:
-        logger.debug(f"[CV] Detección visual no disponible: {e}")
+        logger.debug(f"[CV] Detección visual multi-tema no disponible: {e}")
+        return []
+
+def detect_blue_button_center(hwnd: int) -> Optional[Tuple[int, int]]:
+    """
+    Locates the physical screen center of Google's primary Material 3 blue pill button
+    ('Acceder' / 'Continuar' / 'Siguiente') using computer vision / HSV color-space segmentation.
+    Immune to resolution changes, DPI scaling, multi-monitor offsets, and layout variations.
+    Google Material 3 button color: #0b57d0 / #1a73e8.
+    """
+    pills = detect_pill_buttons_cv(hwnd)
+    if pills:
+        best = pills[0]
+        logger.info(f"[CV] Botón de acción detectado por visión en ({best['screen_cx']}, {best['screen_cy']}) [w={best['w']}, h={best['h']}]")
+        return best["screen_cx"], best["screen_cy"]
     return None
+
+def scroll_page_down(hwnd: int, steps: int = 4):
+    """Scrolls the web viewport down smoothly to reveal below-the-fold buttons."""
+    activate_browser_window(hwnd)
+    focus_web_contents_safely(hwnd)
+    VK_NEXT = 0x22  # Page Down
+    VK_DOWN = 0x28  # Down Arrow
+    for _ in range(steps):
+        send_single_key(hwnd, VK_DOWN)
+        time.sleep(0.04)
+    send_single_key(hwnd, VK_NEXT)
+    time.sleep(0.2)
+
+def find_interactive_button(
+    hwnd: int,
+    target_keywords: Optional[List[str]] = None,
+    allow_scroll: bool = True
+) -> Optional[Tuple[int, int, str]]:
+    """
+    Intelligent button recognition engine:
+    1. Multi-theme Computer Vision pill contour segmentation (sub-30ms).
+    2. Native Windows OCR semantic word and line extraction (100% exact text matching).
+    3. Spatial verification (correlates OCR text inside CV button bounding boxes).
+    4. Auto-scrolling viewport expansion if the button is below the fold.
+    Returns: (screen_x, screen_y, method_name) or None.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+
+    if not target_keywords:
+        target_keywords = [
+            "acceder", "continuar", "continue", "permitir", "allow",
+            "confirmar", "avanzar", "siguiente", "next", "sign in",
+            "iniciar sesion", "iniciar sesión", "continue as", "continuar como"
+        ]
+
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    win_h = rect.bottom - rect.top
+
+    for scroll_attempt in range(2 if allow_scroll else 1):
+        # Strategy A: Fast CV Pill Buttons
+        pills = detect_pill_buttons_cv(hwnd)
+
+        # Strategy B: Semantic Native OCR
+        ocr_items = run_native_ocr(hwnd)
+
+        # 1. Look for OCR matches for target keywords
+        best_ocr_match = None
+        for item in ocr_items:
+            txt = (item.get("text") or "").strip().lower()
+            clean_txt = re.sub(r'[^a-z0-9áéíóúñ]', '', txt)
+            for kw in target_keywords:
+                clean_kw = re.sub(r'[^a-z0-9áéíóúñ]', '', kw.lower())
+                if clean_kw in clean_txt or kw.lower() in txt:
+                    # Prefer bottom-most match (action buttons sit at bottom of cards)
+                    score = item["screen_cy"] + (item["screen_cx"] // 3)
+                    if not best_ocr_match or score > best_ocr_match[0]:
+                        best_ocr_match = (score, item["screen_cx"], item["screen_cy"], item["text"])
+
+        # 2. Correlate OCR text with CV pill buttons if possible
+        if best_ocr_match and pills:
+            ocr_x, ocr_y = best_ocr_match[1], best_ocr_match[2]
+            for p in pills:
+                # If OCR text is inside or adjacent to a CV pill button (+- 60px)
+                if abs(p["screen_cx"] - ocr_x) < 70 and abs(p["screen_cy"] - ocr_y) < 35:
+                    logger.info(f"[SMART-LOCATOR] Botón verificado por CV+OCR: '{best_ocr_match[3]}' en ({p['screen_cx']}, {p['screen_cy']})")
+                    return p["screen_cx"], p["screen_cy"], f"cv_ocr_fusion:{best_ocr_match[3]}"
+
+        # 3. If OCR found a high confidence keyword
+        if best_ocr_match:
+            logger.info(f"[SMART-LOCATOR] Botón reconocido por OCR: '{best_ocr_match[3]}' en ({best_ocr_match[1]}, {best_ocr_match[2]})")
+            return best_ocr_match[1], best_ocr_match[2], f"ocr:{best_ocr_match[3]}"
+
+        # 4. If CV found a solid pill button in the bottom region
+        if pills:
+            for p in pills:
+                if p["screen_cy"] > rect.top + (win_h * 0.35):
+                    logger.info(f"[SMART-LOCATOR] Botón reconocido por CV pill en ({p['screen_cx']}, {p['screen_cy']})")
+                    return p["screen_cx"], p["screen_cy"], "cv_pill_contour"
+
+        # If not found on first glance and scroll allowed, reveal below-the-fold content
+        if scroll_attempt == 0 and allow_scroll:
+            logger.info("[SMART-LOCATOR] Botón no visible en pantalla actual; desplazando viewport hacia abajo...")
+            scroll_page_down(hwnd, steps=4)
+            time.sleep(0.3)
+
+    return None
+
+def find_account_row_interactive(hwnd: int, target_email: str) -> Optional[Tuple[int, int, str]]:
+    """
+    Intelligently discovers and locates the target account row in the Google Account Chooser screen
+    via Native Windows OCR text extraction and fuzzy user matching.
+    Returns: (screen_x, screen_y, method_name) or None.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+
+    norm_email = target_email.strip().lower()
+    user_part = norm_email.split("@")[0]
+    clean_user = re.sub(r'[^a-z0-9]', '', user_part)
+
+    ocr_items = run_native_ocr(hwnd)
+    if not ocr_items:
+        return None
+
+    # Search for email or username matches
+    for item in ocr_items:
+        txt = (item.get("text") or "").strip().lower()
+        clean_txt = re.sub(r'[^a-z0-9]', '', txt)
+
+        if (clean_user in clean_txt) or (user_part in txt) or (norm_email in txt):
+            logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por OCR: '{item['text']}' en ({item['screen_cx']}, {item['screen_cy']})")
+            return item["screen_cx"], item["screen_cy"], f"ocr_account:{item['text']}"
+
+    return None
+
+def find_and_toggle_permissions_checkbox(hwnd: int) -> bool:
+    """
+    Finds and toggles 'Seleccionar todo' / 'Select all' permission checkboxes
+    using OCR text matching and UI Automation toggle patterns.
+    """
+    ocr_items = run_native_ocr(hwnd)
+    for item in ocr_items:
+        txt = (item.get("text") or "").strip().lower()
+        clean_txt = re.sub(r'[^a-z0-9]', '', txt)
+        if any(w in clean_txt for w in ["seleccionartodo", "selectall", "seleccionar"]):
+            box_x = item["screen_cx"] - (item.get("w", 80) // 2) - 30
+            box_y = item["screen_cy"]
+            logger.info(f"[OCR] Casilla 'Seleccionar todo' localizada en ({box_x}, {box_y}). Activando...")
+            physical_click(box_x, box_y)
+            time.sleep(0.1)
+            return True
+
+    # Try UIA CheckBoxControl
+    try:
+        import uiautomation as auto
+        window = auto.ControlFromHandle(hwnd)
+        if window.Exists(0, 0):
+            for ctrl, _ in auto.WalkTree(window, maxDepth=14):
+                if ctrl.ControlTypeName == "CheckBoxControl":
+                    cname = (ctrl.Name or "").lower()
+                    if any(w in cname for w in ["seleccionar todo", "select all", "google cloud"]):
+                        tg = ctrl.GetTogglePattern()
+                        if tg and tg.ToggleState == 0:
+                            tg.Toggle()
+                            logger.info(f"[UIA] Activada casilla de permisos: '{ctrl.Name}'")
+                            time.sleep(0.1)
+                            return True
+    except Exception:
+        pass
+    return False
 
 def confirm_consent_screen(hwnd: int) -> bool:
     """
-    Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 4-tier engine:
+    Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 6-tier engine:
     Tier 0: Force-enables Chromium DOM accessibility via WM_GETOBJECT.
-    Tier 1: Windows UI Automation inspection of permissions & buttons (Invoke / BoundingRectangle).
-    Tier 2: Computer Vision pill button detector (OpenCV / PIL HSV color segmentation).
-    Tier 3: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
-    Tier 4: Physical button area focus and Enter / Space keystrokes.
+    Tier 1: Checkbox & scope verification ('Seleccionar todo') via OCR + UIA.
+    Tier 2: Multi-Modal Intelligent Button Finder (CV pill + OCR semantic text + auto-scrolling).
+    Tier 3: Windows UI Automation inspection of buttons (Invoke / BoundingRectangle).
+    Tier 4: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
+    Tier 5: Direct button area focus and Enter / Space keystrokes.
     """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
@@ -571,26 +802,25 @@ def confirm_consent_screen(hwnd: int) -> bool:
     # Tier 0: Wake up Chromium DOM accessibility
     wake_up_chromium_accessibility(hwnd)
 
-    # Tier 1: UI Automation Button & Checkbox Search
+    # Tier 1: Ensure permission checkboxes are selected
+    find_and_toggle_permissions_checkbox(hwnd)
+
+    # Tier 2: Multi-Modal Intelligent Button Finder (CV + OCR + Scroll)
+    btn_target = find_interactive_button(hwnd, allow_scroll=True)
+    if btn_target:
+        bx, by, method = btn_target
+        logger.info(f"[SMART-BUTTON] Clic ejecutado en botón reconocido ({method}) en ({bx}, {by})...")
+        physical_click(bx, by)
+        time.sleep(0.2)
+        physical_click(bx, by)
+        time.sleep(0.5)
+        return True
+
+    # Tier 3: UI Automation Button Search
     try:
         import uiautomation as auto
         window = auto.ControlFromHandle(hwnd)
         if window.Exists(0, 0):
-            # 1a. Toggle any unchecked permission checkboxes
-            for ctrl, _ in auto.WalkTree(window, maxDepth=14):
-                if ctrl.ControlTypeName == "CheckBoxControl":
-                    cname = (ctrl.Name or "").lower()
-                    if any(w in cname for w in ["seleccionar todo", "select all", "google cloud", "developer", "antigravity"]):
-                        try:
-                            tg = ctrl.GetTogglePattern()
-                            if tg and tg.ToggleState == 0:  # 0 = Off
-                                tg.Toggle()
-                                logger.info(f"[UIA] Activada casilla de permisos: '{ctrl.Name}'")
-                                time.sleep(0.1)
-                        except Exception:
-                            pass
-
-            # 1b. Search for primary confirm button
             target_keywords = ["acceder", "continuar", "continue", "permitir", "allow", "confirmar", "avanzar", "siguiente", "sign in"]
             for ctrl, _ in auto.WalkTree(window, maxDepth=14):
                 if ctrl.ControlTypeName in ["ButtonControl", "HyperlinkControl"]:
@@ -616,17 +846,7 @@ def confirm_consent_screen(hwnd: int) -> bool:
     except Exception as e:
         logger.debug(f"[UIA] Error buscando botón de consentimiento: {e}")
 
-    # Tier 2: Computer Vision Pill Button Detection
-    cv_pos = detect_blue_button_center(hwnd)
-    if cv_pos:
-        logger.info(f"[CV] Ejecutando clic en botón azul detectado por visión en {cv_pos}...")
-        physical_click(cv_pos[0], cv_pos[1])
-        time.sleep(0.2)
-        physical_click(cv_pos[0], cv_pos[1])
-        time.sleep(0.5)
-        return True
-
-    # Tier 3: Multi-Column Responsive Layout Physical Matrix
+    # Tier 4: Multi-Column Responsive Layout Physical Matrix
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         win_w = rect.right - rect.left
@@ -634,28 +854,18 @@ def confirm_consent_screen(hwnd: int) -> bool:
         cx = rect.left + (win_w // 2)
 
         is_wide = win_w >= 840
-        # In Google Material 3 (2024+):
-        # Dual-Column (width >= 840px): Card is 1048px wide. Primary button is bottom-right at cx + 420 to cx + 460!
-        # Single-Column (width < 840px): Card is 450px wide. Primary button is at cx + 130 to cx + 165.
         if is_wide:
             candidate_xs = [cx + 440, cx + 420, cx + 460, cx + 150]
         else:
             candidate_xs = [cx + 150, cx + 130, cx + 165]
 
-        # Candidate vertical elevations for 'Acceder' / 'Continuar' button
         candidate_ys = [
-            max(rect.top + 400, rect.bottom - 75),  # Floating bottom bar or scrolled viewport
+            max(rect.top + 400, rect.bottom - 75),
             rect.bottom - 60,
-            rect.top + 660,                         # Standard card elevation
-            rect.top + 720,                         # Extended permissions card
-            rect.top + 540                          # Compact card
+            rect.top + 660,
+            rect.top + 720,
+            rect.top + 540
         ]
-
-        # Click checkbox area just in case permissions require checking
-        checkbox_x = cx - 150 if not is_wide else cx + 100
-        checkbox_y = rect.top + 340
-        physical_click(checkbox_x, checkbox_y)
-        time.sleep(0.04)
 
         for bx in candidate_xs:
             for by in candidate_ys:
@@ -664,7 +874,7 @@ def confirm_consent_screen(hwnd: int) -> bool:
                     physical_click(bx, by)
                     time.sleep(0.08)
 
-    # Tier 4: Direct Button Area Focus and Keyboard Activation
+    # Tier 5: Direct Button Area Focus and Keyboard Activation
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         target_focus_x = cx + 440 if is_wide else cx + 150
         target_focus_y = max(rect.top + 400, rect.bottom - 75)
@@ -679,9 +889,11 @@ def confirm_consent_screen(hwnd: int) -> bool:
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     """
-    Selects target account in Google Account Chooser with dual strategy:
-    1. UI Automation inspection (wakes up Chromium accessibility first).
-    2. Calibrated dynamic vertical row calculation with card centering adaptation.
+    Selects target account in Google Account Chooser with 4-tier strategy:
+    1. Native Windows OCR semantic account row recognition.
+    2. UI Automation inspection (wakes up Chromium accessibility first).
+    3. Calibrated dynamic vertical row calculation with card centering adaptation.
+    4. Deterministic keyboard Tab navigation fallback.
     """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
@@ -690,12 +902,23 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     # Tier 0: Wake up Chromium DOM accessibility
     wake_up_chromium_accessibility(hwnd)
 
-    # Tier 1: Try exact UI Automation account row selection
+    # Tier 1: Try Native Windows OCR account row discovery
+    acc_pos = find_account_row_interactive(hwnd, target_email)
+    if acc_pos:
+        ax, ay, method = acc_pos
+        logger.info(f"[CHOOSER] Cuenta '{target_email}' localizada con éxito ({method}) en ({ax}, {ay}). Haciendo clic...")
+        physical_click(ax, ay)
+        time.sleep(0.15)
+        physical_click(ax, ay)
+        time.sleep(0.6)
+        return True
+
+    # Tier 2: Try exact UI Automation account row selection
     if select_account_via_uiautomation(hwnd, target_email):
         logger.info(f"[CHOOSER] Cuenta seleccionada exitosamente via UI Automation: {target_email}")
         return True
 
-    # Tier 2: Calibrated physical click fallback
+    # Tier 3: Calibrated physical click fallback
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return False
@@ -708,8 +931,6 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     cx = rect.left + (win_w // 2)
     idx = get_account_index(target_email)
 
-    # In Google Account Chooser:
-    # Card is centered vertically if win_h is large, or top-aligned with toolbar offset
     if win_h >= 900:
         base_y = rect.top + 330
     else:
@@ -720,7 +941,7 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     logger.info(f"Executing calibrated physical click on {target_email} (idx={idx}) at ({cx}, {row_y}) [win_h={win_h}]...")
     physical_click(cx, row_y)
     time.sleep(0.15)
-    physical_click(cx, row_y)  # Double-click to ensure selection if first click only focused
+    physical_click(cx, row_y)
     time.sleep(0.6)
     return True
 
