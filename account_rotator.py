@@ -375,15 +375,41 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         if not await wait_for_and_click_sign_in(page, timeout_sec=10):
             raise RuntimeError("Could not trigger Google Sign In button.")
             
-    # 5. Handle external Google OAuth in default browser with isolation
+    # 5. Handle external Google OAuth in default browser with isolation and real-time sync
     logger.info(f"Handling external Google OAuth in {target_proc} for {target_email}...")
-    oauth_handled = handle_external_google_signin(
-        target_email,
-        timeout_sec=40,
-        pre_hwnds=pre_hwnds,
-        target_process=target_proc
+    import threading
+    auth_event = threading.Event()
+
+    async def poll_auth_success():
+        for _ in range(120):  # poll every 250ms up to 30s
+            if auth_event.is_set():
+                break
+            try:
+                if await is_authenticated_in_dom(page):
+                    auth_event.set()
+                    logger.info("[AUTH-SYNC] Autenticación detectada en Antigravity DOM en tiempo real.")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+
+    poll_task = asyncio.create_task(poll_auth_success())
+
+    loop = asyncio.get_running_loop()
+    oauth_handled = await loop.run_in_executor(
+        None,
+        lambda: handle_external_google_signin(
+            target_email,
+            timeout_sec=35,
+            pre_hwnds=pre_hwnds,
+            target_process=target_proc,
+            auth_event=auth_event
+        )
     )
-    if not oauth_handled:
+    auth_event.set()
+    await poll_task
+
+    if not oauth_handled and not await is_authenticated_in_dom(page):
         logger.warning("External OAuth handler did not confirm success; checking Antigravity state...")
         
     # 6. Wait for Antigravity workbench to re-authenticate (fast polling with living page guard)
@@ -391,7 +417,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     authenticated = False
     browser = getattr(getattr(page, "context", None), "browser", None)
 
-    for _ in range(30):
+    for _ in range(25):
         if browser and browser.is_connected():
             try:
                 page = await ensure_active_page(browser, page)
@@ -400,9 +426,9 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         if await is_authenticated_in_dom(page):
             authenticated = True
             break
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
         
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(0.3)
     
     # 7. Verify new account email (fast polling)
     new_email = None

@@ -211,7 +211,21 @@ async def run_all_tests():
     assert isinstance(pills_empty, list) and len(pills_empty) == 0, "detect_pill_buttons_cv debe retornar lista vacia"
     print("[PASS] 26. Reconocedor Inteligente Multi-Modal de Botones verificado: Fusión CV+OCR y manejo de HWNDs seguro.")
 
-    print("\n--- TODOS LOS 26 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 27. Clasificador Determinista de Pantallas OAuth y Sensor Auth-Sync en Tiempo Real
+    import threading
+    from external_oauth_handler import classify_oauth_screen, handle_external_google_signin
+    assert classify_oauth_screen(0, title="Google Antigravity Auth Success") == "SUCCESS"
+    assert classify_oauth_screen(0, cached_url="http://localhost:59124/?code=abc456") == "SUCCESS"
+    assert classify_oauth_screen(0, title="Elige una cuenta") == "CHOOSER"
+    assert classify_oauth_screen(0, cached_url="https://accounts.google.com/signin/oauth/consent") == "CONSENT"
+    # Test auth_event immediate breakout without timeout
+    test_evt = threading.Event()
+    test_evt.set()  # Already authenticated
+    quick_res = handle_external_google_signin("test@gmail.com", timeout_sec=2, auth_event=test_evt)
+    assert quick_res is True, "handle_external_google_signin debe salir inmediatamente si auth_event esta activo"
+    print("[PASS] 27. Clasificador Determinista y Sensor Auth-Sync verificado: Transiciones exactas y cero tiempo de espera.")
+
+    print("\n--- TODOS LOS 27 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

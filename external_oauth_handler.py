@@ -721,10 +721,14 @@ def find_interactive_button(
 
     return None
 
-def find_account_row_interactive(hwnd: int, target_email: str) -> Optional[Tuple[int, int, str]]:
+def find_account_row_interactive(
+    hwnd: int,
+    target_email: str,
+    allow_scroll: bool = True
+) -> Optional[Tuple[int, int, str]]:
     """
     Intelligently discovers and locates the target account row in the Google Account Chooser screen
-    via Native Windows OCR text extraction and fuzzy user matching.
+    via Native Windows OCR text extraction, name aliases, and fuzzy user matching.
     Returns: (screen_x, screen_y, method_name) or None.
     """
     if not hwnd or not user32.IsWindow(hwnd):
@@ -734,18 +738,35 @@ def find_account_row_interactive(hwnd: int, target_email: str) -> Optional[Tuple
     user_part = norm_email.split("@")[0]
     clean_user = re.sub(r'[^a-z0-9]', '', user_part)
 
-    ocr_items = run_native_ocr(hwnd)
-    if not ocr_items:
-        return None
+    alias_keywords = [norm_email, user_part, clean_user]
+    try:
+        from config_manager import load_accounts_config
+        for acc in load_accounts_config():
+            if acc.get("email", "").strip().lower() == norm_email:
+                name = acc.get("name", "").strip().lower()
+                if name:
+                    alias_keywords.append(name)
+                    alias_keywords.extend(name.split())
+    except Exception:
+        pass
 
-    # Search for email or username matches
-    for item in ocr_items:
-        txt = (item.get("text") or "").strip().lower()
-        clean_txt = re.sub(r'[^a-z0-9]', '', txt)
+    for scroll_attempt in range(2 if allow_scroll else 1):
+        ocr_items = run_native_ocr(hwnd)
+        if ocr_items:
+            for item in ocr_items:
+                txt = (item.get("text") or "").strip().lower()
+                clean_txt = re.sub(r'[^a-z0-9]', '', txt)
 
-        if (clean_user in clean_txt) or (user_part in txt) or (norm_email in txt):
-            logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por OCR: '{item['text']}' en ({item['screen_cx']}, {item['screen_cy']})")
-            return item["screen_cx"], item["screen_cy"], f"ocr_account:{item['text']}"
+                for kw in alias_keywords:
+                    clean_kw = re.sub(r'[^a-z0-9]', '', kw)
+                    if len(clean_kw) >= 3 and (clean_kw in clean_txt or kw in txt):
+                        logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por OCR ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
+                        return item["screen_cx"], item["screen_cy"], f"ocr_account:{item['text']}"
+
+        if scroll_attempt == 0 and allow_scroll:
+            logger.info("[SMART-LOCATOR] Cuenta no visible en primera pasada; desplazando selector hacia abajo...")
+            scroll_page_down(hwnd, steps=2)
+            time.sleep(0.3)
 
     return None
 
@@ -946,11 +967,56 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     return True
 
 
+def classify_oauth_screen(
+    hwnd: int,
+    title: str = "",
+    cached_url: str = "",
+    ocr_items: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """
+    Deterministically classifies the current state of the Google OAuth page:
+    Returns: 'SUCCESS' | 'CHOOSER' | 'CONSENT' | 'SIGNIN_FORM' | 'UNKNOWN'
+    """
+    t_lower = (title or "").lower()
+    u_lower = (cached_url or "").lower()
+
+    # 1. Immediate Success check (Title or URL redirect)
+    if any(w in t_lower for w in ["auth success", "google antigravity auth success"]) or \
+       "auth-success" in u_lower or ("localhost:" in u_lower and "code=" in u_lower) or \
+       ("127.0.0.1:" in u_lower and "code=" in u_lower):
+        return "SUCCESS"
+
+    # 2. Fast URL analysis
+    if "signin/oauth/consent" in u_lower or "approval" in u_lower:
+        return "CONSENT"
+    if "accountchooser" in u_lower or "signin/chooser" in u_lower:
+        return "CHOOSER"
+
+    # 3. Passive Title analysis
+    if any(w in t_lower for w in ["elige una cuenta", "elegir una cuenta", "choose an account"]):
+        return "CHOOSER"
+    if any(w in t_lower for w in ["solicita acceso", "wants access", "permisos"]):
+        return "CONSENT"
+
+    # 4. Deep Semantic OCR analysis
+    if ocr_items:
+        combined_text = " ".join((item.get("text") or "").lower() for item in ocr_items)
+        if any(w in combined_text for w in ["elige una cuenta", "choose an account", "usar otra cuenta", "use another account"]):
+            return "CHOOSER"
+        if any(w in combined_text for w in ["solicita acceso", "quiere acceder", "seleccionar todo", "google cloud", "developer", "continuar", "acceder"]):
+            return "CONSENT"
+        if any(w in combined_text for w in ["introduce tu contraseña", "enter your password", "verificación"]):
+            return "SIGNIN_FORM"
+
+    return "UNKNOWN"
+
+
 def handle_external_google_signin(
     target_email: str,
     timeout_sec: int = 35,
     pre_hwnds: Optional[Set[int]] = None,
-    target_process: Optional[str] = None
+    target_process: Optional[str] = None,
+    auth_event: Optional[Any] = None
 ) -> bool:
     """
     High-Reliability, Multi-Browser-Isolated Google OAuth automation:
@@ -958,10 +1024,9 @@ def handle_external_google_signin(
     2. Excludes 100% of all windows from Chrome, Edge, Brave, or any other user app.
     3. Locks onto confirmed HWND to eliminate focus jumping.
     4. Primary acceleration: Direct OAuth URL injection (login_hint).
-    5. Detects instant success (window title or localhost redirect) and closes tab via Ctrl+W.
-    6. Fallback 1: Calibrated centered physical click.
-    7. Fallback 2: Deterministic Tab navigation.
-    8. Handles consent prompts ('Continuar' / 'Permitir').
+    5. Real-Time Auth Event Sensor: Closes tab immediately when Antigravity confirms auth.
+    6. Deterministic Page Classification (Chooser vs Consent vs Success).
+    7. Semantic OCR and Multi-Theme CV Button Finder.
     """
     if not target_process:
         target_process, _ = get_default_browser_info()
@@ -978,6 +1043,14 @@ def handle_external_google_signin(
     account_selected = False
 
     while time.time() - start_time < timeout_sec:
+        # 0. Real-time background sync with Antigravity workbench
+        if auth_event and auth_event.is_set():
+            logger.info("[AUTH-SYNC] Antigravity confirmó autenticación en segundo plano. Cerrando pestaña OAuth...")
+            if locked_hwnd and user32.IsWindow(locked_hwnd):
+                time.sleep(0.15)
+                close_browser_tab(locked_hwnd)
+            return True
+
         # If locked HWND is still valid and visible, keep using it
         hwnd = locked_hwnd if (locked_hwnd and user32.IsWindow(locked_hwnd) and user32.IsWindowVisible(locked_hwnd)) else None
         if not hwnd:
@@ -987,7 +1060,7 @@ def handle_external_google_signin(
                 logger.debug(f"[LOCK] Bound exclusively to OAuth HWND {hwnd}")
 
         if not hwnd:
-            time.sleep(0.3)
+            time.sleep(0.2)
             continue
 
         # Passive window title check (0ms overhead)
@@ -995,26 +1068,13 @@ def handle_external_google_signin(
         buff = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buff, length + 1)
         title = buff.value
-        t_lower = title.lower()
 
-        # 1. Success verification in title
-        if any(w in title for w in [
-            "Google Antigravity Auth Success",
-            "antigravity.google/auth-success",
-            "Auth Success"
-        ]):
-            logger.info("Authentication success detected in browser window title!")
-            time.sleep(0.3)
-            close_browser_tab(hwnd)
-            logger.info("Closed authentication tab cleanly.")
-            return True
-
-        # 2. Check URL ONLY when needed (avoids focus-stealing Ctrl+L loop)
+        # Check URL when needed (avoids focus-stealing Ctrl+L loop)
         now = time.time()
         should_check_url = False
         if not url_injected and (now - last_url_check > 0.8):
             should_check_url = True
-        elif (now - last_url_check > 3.5) and not any(w in title for w in ["Google Antigravity Auth Success", "Auth Success"]):
+        elif (now - last_url_check > 3.0) and not any(w in title.lower() for w in ["auth success", "google antigravity auth success"]):
             should_check_url = True
 
         if should_check_url:
@@ -1023,12 +1083,12 @@ def handle_external_google_signin(
 
             if "auth-success" in cached_url or ("localhost:" in cached_url and "code=" in cached_url):
                 logger.info(f"Authentication success detected in URL: {cached_url}")
-                time.sleep(0.3)
+                time.sleep(0.2)
                 close_browser_tab(hwnd)
                 logger.info("Closed authentication tab cleanly.")
                 return True
 
-            # PRIMARY ACCELERATION: Direct OAuth URL injection
+            # Direct OAuth URL injection
             if not url_injected and "accounts.google.com" in cached_url:
                 if "login_hint=" not in cached_url:
                     direct_url = build_direct_oauth_url(cached_url, target_email)
@@ -1036,51 +1096,44 @@ def handle_external_google_signin(
                         logger.info(f"Injecting direct OAuth URL with login_hint={target_email}...")
                         inject_url_in_browser(hwnd, direct_url)
                         url_injected = True
-                        time.sleep(0.5)
+                        time.sleep(0.4)
                         continue
 
-        # 3. Handle Account Chooser vs Consent / Acceder Screen
-        # If title clearly says "Elige una cuenta" or "Choose an account", stay on chooser
-        if "elige una cuenta" in t_lower or "elegir una cuenta" in t_lower or "choose an account" in t_lower:
-            account_selected = False
+        # Deterministic Screen Classification
+        screen_type = classify_oauth_screen(hwnd, title=title, cached_url=cached_url)
+        if screen_type == "SUCCESS":
+            logger.info("Authentication success detected in browser!")
+            time.sleep(0.2)
+            close_browser_tab(hwnd)
+            return True
 
-        is_chooser = not account_selected and (
-            "accountchooser" in cached_url.lower() or
-            "elige una cuenta" in t_lower or
-            "elegir una cuenta" in t_lower or
-            "choose an account" in t_lower or
-            ("acceso: cuentas de google" in t_lower and selection_attempts == 0)
-        )
+        ocr_items = None
+        if screen_type == "UNKNOWN":
+            ocr_items = run_native_ocr(hwnd)
+            screen_type = classify_oauth_screen(hwnd, title=title, cached_url=cached_url, ocr_items=ocr_items)
 
-        if is_chooser and selection_attempts < 4:
+        # 1. Handle Account Chooser screen
+        if screen_type == "CHOOSER" and selection_attempts < 5:
             selection_attempts += 1
-            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/4)...")
-
-            # Strategy 1: Accurate calibrated physical click directly on account row!
+            logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
             select_account_via_centered_click(hwnd, target_email)
             account_selected = True
             time.sleep(1.0)
             continue
 
-        # 4. Handle Consent / Confirmation / 'Acceder' Screen
-        is_consent = account_selected or (
-            "acceder" in t_lower or
-            "solicita acceso" in t_lower or
-            "wants access" in t_lower or
-            "permitir" in t_lower or
-            "continuar" in t_lower or
-            "allow" in t_lower or
-            "consent" in cached_url.lower() or
-            "approval" in cached_url.lower()
-        )
-
-        if is_consent:
+        # 2. Handle Consent / 'Acceder' screen
+        if screen_type == "CONSENT" or (account_selected and selection_attempts > 0):
             logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
             confirm_consent_screen(hwnd)
             time.sleep(0.8)
             continue
 
-        time.sleep(0.2)
+        time.sleep(0.15)
+
+    # Final check on auth_event before declaring timeout
+    if auth_event and auth_event.is_set():
+        logger.info("[AUTH-SYNC] Antigravity confirmó autenticación final.")
+        return True
 
     logger.warning("External Google Sign-In timed out.")
     return False
