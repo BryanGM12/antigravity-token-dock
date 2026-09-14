@@ -41,8 +41,10 @@ $notifier.Show($notification)
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
             
+        import base64
+        encoded_cmd = base64.b64encode(ps_cmd.encode("utf-16-le")).decode("ascii")
         res = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_cmd],
             capture_output=True,
             text=True,
             timeout=8,

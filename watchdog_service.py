@@ -65,6 +65,55 @@ def switch_to_interactive_desktop() -> bool:
         pass
     return False
 
+def is_auth_success_window(title: str) -> bool:
+    """
+    Determines with 100% precision whether the window's active tab is an Antigravity OAuth success page.
+    Guarantees that user's personal tabs (search results, GitHub issues, documentation, etc.) are never matched.
+    """
+    if not title:
+        return False
+        
+    t_lower = title.lower().strip()
+    
+    # 1. Immediate negative exclusion: search engines, dev platforms, or general web pages
+    excluded_markers = [
+        "buscar con google",
+        "google search",
+        "duckduckgo",
+        "bing",
+        "github",
+        "gitlab",
+        "stackoverflow",
+        "stack overflow",
+        "reddit",
+        "youtube",
+        "docs",
+        "documentation",
+        "issue",
+        "pull request",
+        "blog"
+    ]
+    if any(marker in t_lower for marker in excluded_markers):
+        return False
+        
+    # 2. Positive confirmation: must contain the exact canonical auth success phrases
+    canonical_markers = [
+        "google antigravity auth success",
+        "antigravity.google/auth-success"
+    ]
+    if not any(m in t_lower for m in canonical_markers):
+        return False
+        
+    # 3. Structural verification: The tab title part (before ' - <browser>') must strictly match
+    # Format in Chromium: "{Tab Title} - {Browser Name}" or simply "{Tab Title}"
+    parts = title.split(" - ")
+    base_title = parts[0].strip().lower()
+    
+    return base_title in [
+        "google antigravity auth success",
+        "antigravity.google/auth-success"
+    ]
+
 def cleanup_orphan_comet_auth_tabs() -> int:
     """
     Finds any lingering 'Google Antigravity Auth Success' tabs in the default browser and closes them cleanly.
@@ -117,7 +166,7 @@ def cleanup_orphan_comet_auth_tabs() -> int:
             buff = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buff, length + 1)
             title = buff.value
-            if "Google Antigravity Auth Success" in title or "antigravity.google/auth-success" in title:
+            if is_auth_success_window(title):
                 matching_hwnds.append(hwnd)
         return True
 
@@ -126,7 +175,20 @@ def cleanup_orphan_comet_auth_tabs() -> int:
     
     for hwnd in matching_hwnds:
         try:
-            logger.info(f"Closing leftover auth tab in {target_proc}: HWND {hwnd}...")
+            # In-flight guard: re-verify the active tab title immediately before sending Ctrl+W
+            # Prevents race condition where the user switched tabs after enumeration
+            if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
+                continue
+                
+            length = user32.GetWindowTextLengthW(hwnd)
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            live_title = buff.value
+            if not is_auth_success_window(live_title):
+                logger.info(f"[Watchdog] HWND {hwnd} ya no muestra pestaña de auth ('{live_title}'). Omitiendo para proteger pestaña personal.")
+                continue
+
+            logger.info(f"Closing leftover auth tab in {target_proc}: HWND {hwnd} ('{live_title}')...")
             if close_browser_tab:
                 close_browser_tab(hwnd)
             else:

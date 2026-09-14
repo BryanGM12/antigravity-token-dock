@@ -35,6 +35,15 @@ logger = logging.getLogger("ExternalOAuthHandler")
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Enable Per-Monitor V2 DPI Awareness for exact physical pixel coordinate precision
+try:
+    user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
 try:
     from config_manager import get_account_tab_map, get_account_row_offset, get_account_index
 except Exception:
@@ -458,22 +467,120 @@ def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
     time.sleep(0.8)
     return True
 
+def wake_up_chromium_accessibility(hwnd: int) -> bool:
+    """
+    Forces Chromium / Blink renderer processes (e.g. comet.exe, chrome.exe, edge.exe)
+    to enable and expose their internal DOM accessibility tree on-demand.
+    Sends WM_GETOBJECT (0x003D) with OBJID_CLIENT (0xFFFFFFFC) and OBJID_NATIVEOM (0xFFFFFFF0)
+    to Chrome_RenderWidgetHostHWND controls.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+
+    WM_GETOBJECT = 0x003D
+    OBJID_CLIENT = 0xFFFFFFFC
+    OBJID_NATIVEOM = 0xFFFFFFF0
+    woken = False
+
+    def enum_child_proc(h_child, lparam):
+        nonlocal woken
+        cls_name = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(h_child, cls_name, 256)
+        c_name = cls_name.value
+        if "RenderWidgetHost" in c_name or "Chrome_WidgetWin" in c_name:
+            user32.SendMessageW(h_child, WM_GETOBJECT, 0, OBJID_CLIENT)
+            user32.SendMessageW(h_child, WM_GETOBJECT, 0, OBJID_NATIVEOM)
+            woken = True
+        return True
+
+    WNDENUMCHILDPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumChildWindows(hwnd, WNDENUMCHILDPROC(enum_child_proc), 0)
+    time.sleep(0.06)
+    return woken
+
+def detect_blue_button_center(hwnd: int) -> Optional[Tuple[int, int]]:
+    """
+    Locates the physical screen center of Google's primary Material 3 blue pill button
+    ('Acceder' / 'Continuar' / 'Siguiente') using computer vision / HSV color-space segmentation.
+    Immune to resolution changes, DPI scaling, multi-monitor offsets, and layout variations.
+    Google Material 3 button color: #0b57d0 / #1a73e8.
+    """
+    try:
+        import numpy as np
+        import cv2
+        from PIL import ImageGrab
+
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+
+        bbox = (rect.left, rect.top, rect.right, rect.bottom)
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            return None
+
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
+        img_np = np.array(img)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+        # Google Primary Button Blue in HSV (Hue 100-125, Saturation 130-255, Value 130-255)
+        lower_blue = np.array([100, 130, 130])
+        upper_blue = np.array([125, 255, 255])
+        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+        # Morphological close to bridge text inside the button
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 7))
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            # Google pill button dimensions: width ~60-260px, height ~28-60px
+            if 60 <= w <= 260 and 28 <= h <= 60:
+                aspect = w / float(h)
+                if 1.5 <= aspect <= 6.5:
+                    score = y + (x // 2)
+                    candidates.append((score, x + (w // 2), y + (h // 2), w, h))
+
+        if candidates:
+            # Pick highest score (bottom-rightmost candidate)
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            best = candidates[0]
+            screen_x = rect.left + best[1]
+            screen_y = rect.top + best[2]
+            logger.info(f"[CV] Botón de acción detectado por visión en ({screen_x}, {screen_y}) [w={best[3]}, h={best[4]}]")
+            return screen_x, screen_y
+    except Exception as e:
+        logger.debug(f"[CV] Detección visual no disponible: {e}")
+    return None
+
 def confirm_consent_screen(hwnd: int) -> bool:
-    """Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with multi-point clicks and keyboard."""
+    """
+    Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 4-tier engine:
+    Tier 0: Force-enables Chromium DOM accessibility via WM_GETOBJECT.
+    Tier 1: Windows UI Automation inspection of permissions & buttons (Invoke / BoundingRectangle).
+    Tier 2: Computer Vision pill button detector (OpenCV / PIL HSV color segmentation).
+    Tier 3: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
+    Tier 4: Physical button area focus and Enter / Space keystrokes.
+    """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.08)
 
-    # 1. UI Automation Button Search (with 'acceder'!)
+    # Tier 0: Wake up Chromium DOM accessibility
+    wake_up_chromium_accessibility(hwnd)
+
+    # Tier 1: UI Automation Button & Checkbox Search
     try:
         import uiautomation as auto
         window = auto.ControlFromHandle(hwnd)
         if window.Exists(0, 0):
-            # Check for any permission checkboxes (e.g. 'Seleccionar todo' or individual scopes)
+            # 1a. Toggle any unchecked permission checkboxes
             for ctrl, _ in auto.WalkTree(window, maxDepth=14):
                 if ctrl.ControlTypeName == "CheckBoxControl":
                     cname = (ctrl.Name or "").lower()
-                    if any(w in cname for w in ["seleccionar todo", "select all", "google cloud", "developer"]):
+                    if any(w in cname for w in ["seleccionar todo", "select all", "google cloud", "developer", "antigravity"]):
                         try:
                             tg = ctrl.GetTogglePattern()
                             if tg and tg.ToggleState == 0:  # 0 = Off
@@ -483,7 +590,7 @@ def confirm_consent_screen(hwnd: int) -> bool:
                         except Exception:
                             pass
 
-            # Search for primary confirm button: MUST include 'acceder'!
+            # 1b. Search for primary confirm button
             target_keywords = ["acceder", "continuar", "continue", "permitir", "allow", "confirmar", "avanzar", "siguiente", "sign in"]
             for ctrl, _ in auto.WalkTree(window, maxDepth=14):
                 if ctrl.ControlTypeName in ["ButtonControl", "HyperlinkControl"]:
@@ -494,7 +601,7 @@ def confirm_consent_screen(hwnd: int) -> bool:
                             inv = ctrl.GetInvokePattern()
                             if inv:
                                 inv.Invoke()
-                                time.sleep(0.6)
+                                time.sleep(0.5)
                                 return True
                         except Exception:
                             pass
@@ -504,56 +611,91 @@ def confirm_consent_screen(hwnd: int) -> bool:
                             cy = r.top + (r.bottom - r.top) // 2
                             logger.info(f"[UIA] Clic directo en botón '{ctrl.Name}' en ({cx}, {cy})")
                             physical_click(cx, cy)
-                            time.sleep(0.6)
+                            time.sleep(0.5)
                             return True
     except Exception as e:
         logger.debug(f"[UIA] Error buscando botón de consentimiento: {e}")
 
-    # 2. Multi-Point Physical Clicks on the 'Acceder' / 'Continuar' column
-    # In Google OAuth, 'Acceder' is the primary action button on the bottom-right of the card.
+    # Tier 2: Computer Vision Pill Button Detection
+    cv_pos = detect_blue_button_center(hwnd)
+    if cv_pos:
+        logger.info(f"[CV] Ejecutando clic en botón azul detectado por visión en {cv_pos}...")
+        physical_click(cv_pos[0], cv_pos[1])
+        time.sleep(0.2)
+        physical_click(cv_pos[0], cv_pos[1])
+        time.sleep(0.5)
+        return True
+
+    # Tier 3: Multi-Column Responsive Layout Physical Matrix
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         win_w = rect.right - rect.left
         win_h = rect.bottom - rect.top
         cx = rect.left + (win_w // 2)
-        btn_x = cx + 145  # Center of the right-hand primary button column
 
-        # Click 'Seleccionar todo' checkbox area just in case permissions require checking
-        checkbox_x = cx - 150
-        checkbox_y = rect.top + 300
-        physical_click(checkbox_x, checkbox_y)
-        time.sleep(0.05)
+        is_wide = win_w >= 840
+        # In Google Material 3 (2024+):
+        # Dual-Column (width >= 840px): Card is 1048px wide. Primary button is bottom-right at cx + 420 to cx + 460!
+        # Single-Column (width < 840px): Card is 450px wide. Primary button is at cx + 130 to cx + 165.
+        if is_wide:
+            candidate_xs = [cx + 440, cx + 420, cx + 460, cx + 150]
+        else:
+            candidate_xs = [cx + 150, cx + 130, cx + 165]
 
-        # Candidate vertical positions for 'Acceder' / 'Continuar' button:
+        # Candidate vertical elevations for 'Acceder' / 'Continuar' button
         candidate_ys = [
-            rect.top + 660,                   # Standard Google Cloud scopes card
-            rect.top + 540,                   # Short consent card
-            rect.top + 720,                   # Extended scopes card
-            max(rect.top + 400, rect.bottom - 75)  # Bottom of visible viewport if scrolled
+            max(rect.top + 400, rect.bottom - 75),  # Floating bottom bar or scrolled viewport
+            rect.bottom - 60,
+            rect.top + 660,                         # Standard card elevation
+            rect.top + 720,                         # Extended permissions card
+            rect.top + 540                          # Compact card
         ]
 
-        for cy in candidate_ys:
-            if cy < rect.bottom:
-                logger.info(f"Targeting 'Acceder' at ({btn_x}, {cy})...")
-                physical_click(btn_x, cy)
-                time.sleep(0.12)
+        # Click checkbox area just in case permissions require checking
+        checkbox_x = cx - 150 if not is_wide else cx + 100
+        checkbox_y = rect.top + 340
+        physical_click(checkbox_x, checkbox_y)
+        time.sleep(0.04)
 
-    # 3. Keyboard confirmation
-    # Scroll to bottom to ensure 'Acceder' is in view and interactive
-    send_key_combination(hwnd, 0x11, 0x23)  # Ctrl + End
-    time.sleep(0.08)
-    send_single_key(hwnd, 0x09)  # Tab to focus primary button
+        for bx in candidate_xs:
+            for by in candidate_ys:
+                if by < rect.bottom and (rect.left < bx < rect.right):
+                    logger.info(f"Targeting 'Acceder' at ({bx}, {by}) [is_wide={is_wide}]...")
+                    physical_click(bx, by)
+                    time.sleep(0.08)
+
+    # Tier 4: Direct Button Area Focus and Keyboard Activation
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        target_focus_x = cx + 440 if is_wide else cx + 150
+        target_focus_y = max(rect.top + 400, rect.bottom - 75)
+        physical_click(target_focus_x, target_focus_y)
+        time.sleep(0.06)
+
+    send_single_key(hwnd, 0x0D)  # VK_RETURN (Enter)
     time.sleep(0.05)
-    send_single_key(hwnd, 0x0D)  # Enter
+    send_single_key(hwnd, 0x20)  # VK_SPACE (Space)
     time.sleep(0.3)
     return True
 
 def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
-    """Calibrated physical click directly on Google Account Chooser row."""
+    """
+    Selects target account in Google Account Chooser with dual strategy:
+    1. UI Automation inspection (wakes up Chromium accessibility first).
+    2. Calibrated dynamic vertical row calculation with card centering adaptation.
+    """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.08)
 
+    # Tier 0: Wake up Chromium DOM accessibility
+    wake_up_chromium_accessibility(hwnd)
+
+    # Tier 1: Try exact UI Automation account row selection
+    if select_account_via_uiautomation(hwnd, target_email):
+        logger.info(f"[CHOOSER] Cuenta seleccionada exitosamente via UI Automation: {target_email}")
+        return True
+
+    # Tier 2: Calibrated physical click fallback
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return False
@@ -567,16 +709,21 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     idx = get_account_index(target_email)
 
     # In Google Account Chooser:
-    # First row center is at ~ rect.top + 330
-    # Each row is ~ 68px tall
-    row_y = rect.top + 330 + (idx * 68)
+    # Card is centered vertically if win_h is large, or top-aligned with toolbar offset
+    if win_h >= 900:
+        base_y = rect.top + 330
+    else:
+        base_y = rect.top + 280
+
+    row_y = base_y + (idx * 68)
 
     logger.info(f"Executing calibrated physical click on {target_email} (idx={idx}) at ({cx}, {row_y}) [win_h={win_h}]...")
     physical_click(cx, row_y)
-    time.sleep(0.2)
+    time.sleep(0.15)
     physical_click(cx, row_y)  # Double-click to ensure selection if first click only focused
     time.sleep(0.6)
     return True
+
 
 def handle_external_google_signin(
     target_email: str,
