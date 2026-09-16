@@ -1,4 +1,4 @@
-﻿# Antigravity Account Daemon, Docked Widget & Auto-Activator Controller
+# Antigravity Account Daemon, Docked Widget & Auto-Activator Controller
 [CmdletBinding()]
 param(
     [Parameter(Position=0)]
@@ -99,6 +99,7 @@ switch ($Action.ToLower()) {
             $actP = Start-Process -FilePath "pythonw.exe" `
                 -ArgumentList @("$ScriptDir\antigravity_auto_activator.py", "--daemon") `
                 -WorkingDirectory $ScriptDir `
+                -WindowStyle Hidden `
                 -PassThru
             if ($actP) {
                 $actP.Id | Out-File -FilePath $ActivatorPidFile -Force -Encoding ascii
@@ -116,6 +117,7 @@ switch ($Action.ToLower()) {
             $proc = Start-Process -FilePath "pythonw.exe" `
                 -ArgumentList $argsList `
                 -WorkingDirectory $ScriptDir `
+                -WindowStyle Hidden `
                 -PassThru
             if ($proc) {
                 $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii
@@ -133,6 +135,7 @@ switch ($Action.ToLower()) {
             $newW = Start-Process -FilePath "pythonw.exe" `
                 -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
                 -WorkingDirectory $ScriptDir `
+                -WindowStyle Hidden `
                 -PassThru
             if ($newW) {
                 $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii
@@ -155,6 +158,7 @@ switch ($Action.ToLower()) {
         $newW = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
             -WorkingDirectory $ScriptDir `
+            -WindowStyle Hidden `
             -PassThru
         if ($newW) {
             $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii
@@ -236,6 +240,7 @@ switch ($Action.ToLower()) {
         $actP = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\antigravity_auto_activator.py", "--daemon") `
             -WorkingDirectory $ScriptDir `
+            -WindowStyle Hidden `
             -PassThru
         if ($actP) { $actP.Id | Out-File -FilePath $ActivatorPidFile -Force -Encoding ascii }
 
@@ -243,6 +248,7 @@ switch ($Action.ToLower()) {
         $proc = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\daemon_service.py", "--daemon") `
             -WorkingDirectory $ScriptDir `
+            -WindowStyle Hidden `
             -PassThru
         if ($proc) { $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii }
 
@@ -250,6 +256,7 @@ switch ($Action.ToLower()) {
         $newW = Start-Process -FilePath "pythonw.exe" `
             -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
             -WorkingDirectory $ScriptDir `
+            -WindowStyle Hidden `
             -PassThru
         if ($newW) { $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii }
 

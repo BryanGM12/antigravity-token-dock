@@ -543,7 +543,19 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/switch":
             logger.info("Manual switch triggered via Local HUD API!")
             switch_script = os.path.join(SCRIPT_DIR, "daemon_service.py")
-            subprocess.Popen([sys.executable, switch_script, "--switch-now"])
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+            subprocess.Popen(
+                [sys.executable, switch_script, "--switch-now"],
+                startupinfo=startupinfo,
+                creationflags=creationflags
+            )
             
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

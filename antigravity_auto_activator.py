@@ -85,9 +85,16 @@ def start_daemon_service() -> bool:
     pythonw = get_pythonw_executable()
     daemon_script = str(SCRIPT_DIR / "daemon_service.py")
     try:
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+
         proc = subprocess.Popen(
             [pythonw, daemon_script, "--daemon"],
             cwd=str(SCRIPT_DIR),
+            startupinfo=startupinfo,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         )
         with open(DAEMON_PID_FILE, "w", encoding="ascii") as f:
@@ -107,9 +114,16 @@ def start_widget_overlay() -> bool:
     pythonw = get_pythonw_executable()
     widget_script = str(SCRIPT_DIR / "antigravity_docked_overlay.py")
     try:
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+
         proc = subprocess.Popen(
             [pythonw, widget_script],
             cwd=str(SCRIPT_DIR),
+            startupinfo=startupinfo,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         )
         with open(WIDGET_PID_FILE, "w", encoding="ascii") as f:
@@ -287,9 +301,16 @@ def start_background_activator():
 
     pythonw = get_pythonw_executable()
     script = str(SCRIPT_DIR / "antigravity_auto_activator.py")
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+
     proc = subprocess.Popen(
         [pythonw, script, "--daemon"],
         cwd=str(SCRIPT_DIR),
+        startupinfo=startupinfo,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     )
     with open(ACTIVATOR_PID_FILE, "w", encoding="ascii") as f:

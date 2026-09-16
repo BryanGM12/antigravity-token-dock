@@ -36,19 +36,22 @@ $notifier.Show($notification)
 """
         # Execute powershell with hidden window
         startupinfo = None
+        creationflags = 0
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             
         import base64
         encoded_cmd = base64.b64encode(ps_cmd.encode("utf-16-le")).decode("ascii")
         res = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_cmd],
+            ["powershell.exe", "-WindowStyle", "Hidden", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_cmd],
             capture_output=True,
             text=True,
             timeout=8,
-            startupinfo=startupinfo
+            startupinfo=startupinfo,
+            creationflags=creationflags
         )
         if res.returncode == 0:
             logger.info(f"Toast notification sent: '{title}' - '{message}'")
@@ -110,6 +113,36 @@ def notify_auto_switch_toggled(enabled: bool):
     state = "ACTIVADA" if enabled else "PAUSADA"
     title = f"↻ Antigravity: Auto-Rotación {state}"
     msg = "El daemon cambiará automáticamente de cuenta al agotarse cuota." if enabled else "La cuenta actual se mantendrá fija hasta rotación manual."
+    send_windows_toast(title, msg)
+
+def notify_verification_required(
+    account_email: str,
+    challenge_type: str,
+    details: str = "",
+    prompt_number: Optional[str] = None
+):
+    """Notification when Google requires additional 2FA / challenge verification."""
+    acc_name = account_email.split('@')[0] if account_email else "Google"
+    title = f"✦ Antigravity: Verificación de Google ({acc_name})"
+
+    c_upper = (challenge_type or "").upper()
+    if ("PHONE_PROMPT" in c_upper or "DEVICE" in c_upper) and prompt_number:
+        msg = f"Toca el número {prompt_number} en tu teléfono para autorizar el acceso."
+    elif "PHONE_PROMPT" in c_upper or "DEVICE" in c_upper:
+        msg = "Comprueba tu teléfono y pulsa 'Sí' en la notificación de Google."
+    elif "CODE" in c_upper or "2FA" in c_upper or "TOTP" in c_upper:
+        msg = "Introduce el código de verificación (SMS o Google Authenticator)."
+    elif "PASSWORD" in c_upper or "PWD" in c_upper:
+        msg = "Introduce la contraseña de la cuenta en el navegador para continuar."
+    elif "RECOVERY" in c_upper:
+        msg = "Confirma tu método de recuperación para verificar tu identidad."
+    elif "PASSKEY" in c_upper or "SECURITY_KEY" in c_upper:
+        msg = "Usa tu llave de seguridad física o passkey para continuar."
+    elif "CAPTCHA" in c_upper:
+        msg = "Resuelve el captcha en el navegador para continuar."
+    else:
+        msg = details or "Google requiere verificación adicional en el navegador."
+
     send_windows_toast(title, msg)
 
 if __name__ == "__main__":

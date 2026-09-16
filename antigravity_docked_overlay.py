@@ -265,12 +265,22 @@ class WorkerSwitchAccount(QThread):
     def run(self):
         try:
             cmd = [sys.executable, str(DAEMON_SCRIPT), "--switch-to", self.target_email]
+            startupinfo = None
+            creationflags = 0
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
             res = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=80,
-                cwd=str(BASE_DIR)
+                cwd=str(BASE_DIR),
+                startupinfo=startupinfo,
+                creationflags=creationflags
             )
             if res.returncode == 0:
                 self.finished.emit(True, f"Sesión activa: {self.target_email}")
@@ -286,12 +296,22 @@ class WorkerRefreshQuota(QThread):
     def run(self):
         try:
             cmd = [sys.executable, str(DAEMON_SCRIPT), "--status"]
+            startupinfo = None
+            creationflags = 0
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
             res = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=25,
-                cwd=str(BASE_DIR)
+                cwd=str(BASE_DIR),
+                startupinfo=startupinfo,
+                creationflags=creationflags
             )
             self.finished.emit(res.returncode == 0, "Tokens sincronizados en vivo")
         except Exception as e:

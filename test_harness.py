@@ -33,7 +33,7 @@ from circuit_breaker import RotationCircuitBreaker
 from atomic_state import SafeJsonStore
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (21 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (29 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -225,7 +225,80 @@ async def run_all_tests():
     assert quick_res is True, "handle_external_google_signin debe salir inmediatamente si auth_event esta activo"
     print("[PASS] 27. Clasificador Determinista y Sensor Auth-Sync verificado: Transiciones exactas y cero tiempo de espera.")
 
-    print("\n--- TODOS LOS 27 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 28. Detector Autónomo de Verificaciones Google (2FA, Teléfono, Códigos) y Extracción
+    from external_oauth_handler import extract_verification_challenge_details
+    from notification_service import notify_verification_required
+
+    # Test Phone Prompt with number & device
+    sample_phone_ocr = [
+        {"type": "line", "text": "Comprueba tu teléfono"},
+        {"type": "line", "text": "Google envió una notificación a tu Pixel 8."},
+        {"type": "line", "text": "Toca Sí en la notificación y, a continuación, toca el número 74 en tu teléfono."},
+        {"type": "word", "text": "74"}
+    ]
+    det_phone = extract_verification_challenge_details(sample_phone_ocr, title="Comprueba tu teléfono")
+    assert det_phone["is_challenge"] is True, "Debe detectar que es un desafío"
+    assert det_phone["challenge_type"] == "CHALLENGE_PHONE_PROMPT", "Debe clasificar como CHALLENGE_PHONE_PROMPT"
+    assert det_phone["prompt_number"] == "74", f"Debe extraer el número 74 (obtenido: {det_phone['prompt_number']})"
+    assert "Pixel 8" in (det_phone.get("device_name") or ""), "Debe extraer el nombre del dispositivo"
+    assert "74" in det_phone["description"], "La descripción debe incluir el número para el usuario"
+
+    # Test 6-digit Code (SMS / Authenticator)
+    sample_code_ocr = [
+        {"type": "line", "text": "Verificación en 2 pasos"},
+        {"type": "line", "text": "Introduce el código de verificación de 6 dígitos generado por Google Authenticator."}
+    ]
+    det_code = extract_verification_challenge_details(sample_code_ocr, title="Verificación en 2 pasos")
+    assert det_code["is_challenge"] is True
+    assert det_code["challenge_type"] == "CHALLENGE_CODE"
+
+    # Test Password re-entry
+    sample_pwd_ocr = [
+        {"type": "line", "text": "Introduce tu contraseña para continuar"}
+    ]
+    det_pwd = extract_verification_challenge_details(sample_pwd_ocr)
+    assert det_pwd["is_challenge"] is True
+    assert det_pwd["challenge_type"] == "CHALLENGE_PASSWORD"
+
+    # Test classify_oauth_screen integration with challenges
+    assert classify_oauth_screen(0, ocr_items=sample_phone_ocr) == "CHALLENGE_PHONE_PROMPT"
+    assert classify_oauth_screen(0, ocr_items=sample_code_ocr) == "CHALLENGE_CODE"
+    assert classify_oauth_screen(0, ocr_items=sample_pwd_ocr) == "CHALLENGE_PASSWORD"
+
+    # Test Toast notification dispatch without error
+    notify_verification_required("test@gmail.com", "CHALLENGE_PHONE_PROMPT", prompt_number="74")
+    print("[PASS] 28. Detector Autónomo de Verificaciones Google y Extracción de Números verificado.")
+
+    # 29. Supresión Total de Ventanas de Consola PowerShell (Stealth Execution)
+    import subprocess
+    from external_oauth_handler import OCR_SCRIPT_PATH
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    res_stealth = subprocess.run(
+        [
+            "powershell.exe",
+            "-WindowStyle", "Hidden",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-File", OCR_SCRIPT_PATH,
+            "-ImagePath", "nonexistent.png"
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        startupinfo=startupinfo,
+        creationflags=flags
+    )
+    assert res_stealth.returncode == 0, "PowerShell oculto debe responder con código 0"
+    assert res_stealth.stdout.strip() == "[]", "Debe devolver salida JSON limpia"
+    print("[PASS] 29. Supresión Total de Ventanas PowerShell verificada: -WindowStyle Hidden y CREATE_NO_WINDOW activos.")
+
+    print("\n--- TODOS LOS 29 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

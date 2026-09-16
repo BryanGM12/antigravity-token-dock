@@ -529,11 +529,29 @@ def run_native_ocr(hwnd: int) -> List[Dict[str, Any]]:
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
         img.save(tmp_path)
 
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         res = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", OCR_SCRIPT_PATH, "-ImagePath", tmp_path],
+            [
+                "powershell.exe",
+                "-WindowStyle", "Hidden",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-File", OCR_SCRIPT_PATH,
+                "-ImagePath", tmp_path
+            ],
             capture_output=True,
             text=True,
-            timeout=8
+            timeout=8,
+            startupinfo=startupinfo,
+            creationflags=creationflags
         )
         raw_items = json.loads(res.stdout.strip() or "[]")
         screen_items = []
@@ -967,6 +985,158 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
     return True
 
 
+def extract_verification_challenge_details(
+    ocr_items: Optional[List[Dict[str, Any]]] = None,
+    title: str = "",
+    cached_url: str = ""
+) -> Dict[str, Any]:
+    """
+    Deterministically detects and extracts structured Google OAuth verification challenge details:
+    Detects 2FA, phone prompts ("Toca el número XX"), SMS/Authenticator codes, passwords,
+    recovery emails, passkeys, and captchas.
+    """
+    t_lower = (title or "").lower()
+    u_lower = (cached_url or "").lower()
+    items = ocr_items or []
+    raw_text = " ".join((item.get("text") or "").strip() for item in items)
+    c_lower = raw_text.lower()
+
+    challenge_type: Optional[str] = None
+    prompt_number: Optional[str] = None
+    device_name: Optional[str] = None
+
+    # 1. Phone Prompt / Device Challenge ("Comprueba tu teléfono", "Toca XX", "Tap Yes")
+    phone_keywords = [
+        "comprueba tu teléfono", "comprueba tu telefono", "check your phone",
+        "toca sí", "toca si", "tap yes", "toca el número", "toca el numero",
+        "tap the number", "notificación a tu", "notificacion a tu", "notification to your",
+        "abre la app", "abre la aplicación", "open the gmail", "open the youtube",
+        "google prompt"
+    ]
+    is_phone_url = any(k in u_lower for k in ["challenge/ipp", "challenge/az", "challenge/dp"])
+    is_phone_title = any(k in t_lower for k in ["comprueba tu tel", "check your phone"])
+    is_phone_text = any(k in c_lower for k in phone_keywords)
+
+    if is_phone_url or is_phone_title or is_phone_text:
+        challenge_type = "CHALLENGE_PHONE_PROMPT"
+
+        # Strategy A: Regex phrase search e.g. "toca el número 74", "toca 74", "tap 74"
+        m_num = re.search(
+            r'(?:toca\s+(?:el\s+)?(?:n[úu]mero\s+)?|tap\s+(?:the\s+)?(?:number\s+)?)\s*[:\s]?\s*([0-9]{1,3})\b',
+            raw_text,
+            re.IGNORECASE
+        )
+        if m_num:
+            prompt_number = m_num.group(1)
+
+        # Strategy B: Standalone 2-digit items in OCR
+        if not prompt_number and items:
+            for it in items:
+                txt = (it.get("text") or "").strip()
+                if re.fullmatch(r'[0-9]{2}', txt):
+                    val = int(txt)
+                    if 10 <= val <= 99:
+                        prompt_number = txt
+                        break
+
+        # Extract device name e.g. "Pixel 8", "Galaxy S23", "iPhone"
+        m_dev = re.search(
+            r'(?:notificaci[oó]n\s+a\s+tu|notification\s+to\s+your)\s+([A-Za-z0-9\s\-_]+?)(?:\.|\n|y\b|and\b|,|$)',
+            raw_text,
+            re.IGNORECASE
+        )
+        if m_dev:
+            device_name = m_dev.group(1).strip()
+
+    # 2. Code / 2FA Challenge (SMS or Authenticator)
+    elif any(k in c_lower for k in [
+        "introduce el código", "introduce el codigo", "enter the code",
+        "código de verificación", "codigo de verificacion", "verification code",
+        "authenticator", "mensaje de texto", "text message",
+        "6 dígitos", "6 digitos", "6-digit code",
+        "código de seguridad", "codigo de seguridad", "ingresa el código", "ingresa el codigo"
+    ]) or any(k in u_lower for k in ["challenge/totp", "challenge/sms", "challenge/oob"]):
+        challenge_type = "CHALLENGE_CODE"
+
+    # 3. Password Challenge
+    elif any(k in c_lower for k in [
+        "introduce tu contraseña", "introduce tu contrasena", "enter your password",
+        "escribe tu contraseña", "escribe tu contrasena",
+        "confirma tu contraseña", "confirma tu contrasena"
+    ]) or "challenge/pwd" in u_lower:
+        challenge_type = "CHALLENGE_PASSWORD"
+
+    # 4. Recovery Challenge
+    elif any(k in c_lower for k in [
+        "correo de recuperación", "correo de recuperacion", "recovery email",
+        "teléfono de recuperación", "telefono de recuperacion", "recovery phone"
+    ]) or "challenge/recovery" in u_lower:
+        challenge_type = "CHALLENGE_RECOVERY"
+
+    # 5. Passkey / Security Key
+    elif any(k in c_lower for k in [
+        "llave de seguridad", "security key", "llave de paso",
+        "passkey", "huella digital", "bloqueo de pantalla"
+    ]) or any(k in u_lower for k in ["challenge/kpe", "challenge/pk"]):
+        challenge_type = "CHALLENGE_PASSKEY"
+
+    # 6. Captcha / Bot Challenge
+    elif any(k in c_lower for k in [
+        "escribe los caracteres", "type the characters", "captcha",
+        "tráfico inusual", "trafico inusual", "actividad sospechosa"
+    ]) or "challenge/captcha" in u_lower:
+        challenge_type = "CHALLENGE_CAPTCHA"
+
+    # 7. Generic 2-Step Verification
+    elif any(k in c_lower for k in [
+        "verificación en 2 pasos", "verificacion en dos pasos",
+        "verificación de dos pasos", "verificacion de dos pasos",
+        "2-step verification", "verificar tu identidad",
+        "más formas de verificar", "mas formas de verificar"
+    ]) or any(k in t_lower for k in ["verificación", "verification"]) or "signin/challenge" in u_lower:
+        challenge_type = "CHALLENGE_GENERIC"
+
+    if not challenge_type:
+        return {
+            "is_challenge": False,
+            "challenge_type": None,
+            "prompt_number": None,
+            "device_name": None,
+            "description": "",
+            "raw_text": raw_text
+        }
+
+    # Build human-readable Spanish description
+    if challenge_type == "CHALLENGE_PHONE_PROMPT":
+        if prompt_number:
+            dev_str = f" en tu {device_name}" if device_name else " en tu teléfono"
+            desc = f"Toca el número {prompt_number}{dev_str} para autorizar el acceso."
+        else:
+            dev_str = f" a tu {device_name}" if device_name else " a tu teléfono"
+            desc = f"Google envió una notificación{dev_str}. Toca 'Sí' para confirmar."
+    elif challenge_type == "CHALLENGE_CODE":
+        desc = "Introduce el código de verificación de 6 dígitos (SMS o Google Authenticator)."
+    elif challenge_type == "CHALLENGE_PASSWORD":
+        desc = "Introduce la contraseña de tu cuenta de Google en la ventana del navegador."
+    elif challenge_type == "CHALLENGE_RECOVERY":
+        desc = "Confirma tu correo o teléfono de recuperación en el navegador."
+    elif challenge_type == "CHALLENGE_PASSKEY":
+        desc = "Usa tu llave de seguridad USB o passkey biométrica."
+    elif challenge_type == "CHALLENGE_CAPTCHA":
+        desc = "Resuelve el captcha mostrado en el navegador."
+    else:
+        desc = "Google requiere una verificación de seguridad adicional en el navegador."
+
+    return {
+        "is_challenge": True,
+        "challenge_type": challenge_type,
+        "prompt_number": prompt_number,
+        "device_name": device_name,
+        "description": desc,
+        "raw_text": raw_text
+    }
+
+
 def classify_oauth_screen(
     hwnd: int,
     title: str = "",
@@ -975,7 +1145,9 @@ def classify_oauth_screen(
 ) -> str:
     """
     Deterministically classifies the current state of the Google OAuth page:
-    Returns: 'SUCCESS' | 'CHOOSER' | 'CONSENT' | 'SIGNIN_FORM' | 'UNKNOWN'
+    Returns: 'SUCCESS' | 'CHOOSER' | 'CONSENT' | 'CHALLENGE_PHONE_PROMPT' |
+             'CHALLENGE_CODE' | 'CHALLENGE_PASSWORD' | 'CHALLENGE_RECOVERY' |
+             'CHALLENGE_PASSKEY' | 'CHALLENGE_CAPTCHA' | 'CHALLENGE_GENERIC' | 'UNKNOWN'
     """
     t_lower = (title or "").lower()
     u_lower = (cached_url or "").lower()
@@ -986,27 +1158,30 @@ def classify_oauth_screen(
        ("127.0.0.1:" in u_lower and "code=" in u_lower):
         return "SUCCESS"
 
-    # 2. Fast URL analysis
+    # 2. Check Challenge / 2FA Verification (URL, Title, or OCR)
+    ch_details = extract_verification_challenge_details(ocr_items, title=title, cached_url=cached_url)
+    if ch_details["is_challenge"]:
+        return ch_details["challenge_type"]
+
+    # 3. Fast URL analysis
     if "signin/oauth/consent" in u_lower or "approval" in u_lower:
         return "CONSENT"
     if "accountchooser" in u_lower or "signin/chooser" in u_lower:
         return "CHOOSER"
 
-    # 3. Passive Title analysis
+    # 4. Passive Title analysis
     if any(w in t_lower for w in ["elige una cuenta", "elegir una cuenta", "choose an account"]):
         return "CHOOSER"
     if any(w in t_lower for w in ["solicita acceso", "wants access", "permisos"]):
         return "CONSENT"
 
-    # 4. Deep Semantic OCR analysis
+    # 5. Deep Semantic OCR analysis
     if ocr_items:
         combined_text = " ".join((item.get("text") or "").lower() for item in ocr_items)
         if any(w in combined_text for w in ["elige una cuenta", "choose an account", "usar otra cuenta", "use another account"]):
             return "CHOOSER"
         if any(w in combined_text for w in ["solicita acceso", "quiere acceder", "seleccionar todo", "google cloud", "developer", "continuar", "acceder"]):
             return "CONSENT"
-        if any(w in combined_text for w in ["introduce tu contraseña", "enter your password", "verificación"]):
-            return "SIGNIN_FORM"
 
     return "UNKNOWN"
 
@@ -1034,6 +1209,8 @@ def handle_external_google_signin(
     logger.info(f"Starting multi-browser isolated Google Sign-In for {target_email} (Browser: {target_process})...")
     switch_to_interactive_desktop()
     start_time = time.time()
+    effective_deadline = start_time + timeout_sec
+    max_safety_limit = 300.0  # Max 5 minutes total ceiling
 
     selection_attempts = 0
     last_url_check = 0.0
@@ -1041,8 +1218,10 @@ def handle_external_google_signin(
     url_injected = False
     locked_hwnd: Optional[int] = None
     account_selected = False
+    challenge_notified = False
+    last_prompt_number: Optional[str] = None
 
-    while time.time() - start_time < timeout_sec:
+    while time.time() < effective_deadline and (time.time() - start_time) < max_safety_limit:
         # 0. Real-time background sync with Antigravity workbench
         if auth_event and auth_event.is_set():
             logger.info("[AUTH-SYNC] Antigravity confirmó autenticación en segundo plano. Cerrando pestaña OAuth...")
@@ -1112,7 +1291,29 @@ def handle_external_google_signin(
             ocr_items = run_native_ocr(hwnd)
             screen_type = classify_oauth_screen(hwnd, title=title, cached_url=cached_url, ocr_items=ocr_items)
 
-        # 1. Handle Account Chooser screen
+        # 1. Handle Google Verification Challenges (Phone prompt, SMS, Authenticator, Password, etc.)
+        if screen_type.startswith("CHALLENGE") or screen_type == "SIGNIN_FORM":
+            ch_details = extract_verification_challenge_details(ocr_items, title=title, cached_url=cached_url)
+            p_num = ch_details.get("prompt_number")
+            desc = ch_details.get("description") or "Google requiere verificación adicional."
+
+            if not challenge_notified or (p_num and p_num != last_prompt_number):
+                challenge_notified = True
+                last_prompt_number = p_num
+                logger.warning(f"✦ [VERIFICACIÓN GOOGLE REQUERIDA] {desc} (Cuenta: {target_email})")
+                try:
+                    from notification_service import notify_verification_required
+                    notify_verification_required(target_email, screen_type, details=desc, prompt_number=p_num)
+                except Exception as ne:
+                    logger.debug(f"Error enviando notificación toast: {ne}")
+
+            # Extend deadline by 120s from now so the user has sufficient time to complete verification
+            effective_deadline = max(effective_deadline, time.time() + 120.0)
+            logger.info(f"[CHALLENGE-WAIT] Esperando resolución del usuario en dispositivo... ({desc})")
+            time.sleep(1.5)
+            continue
+
+        # 2. Handle Account Chooser screen
         if screen_type == "CHOOSER" and selection_attempts < 5:
             selection_attempts += 1
             logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
@@ -1121,7 +1322,7 @@ def handle_external_google_signin(
             time.sleep(1.0)
             continue
 
-        # 2. Handle Consent / 'Acceder' screen
+        # 3. Handle Consent / 'Acceder' screen
         if screen_type == "CONSENT" or (account_selected and selection_attempts > 0):
             logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
             confirm_consent_screen(hwnd)
