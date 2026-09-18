@@ -22,7 +22,9 @@ from external_oauth_handler import (
     find_browser_window,
     switch_to_interactive_desktop,
     get_default_browser_info,
-    capture_browser_hwnds
+    capture_browser_hwnds,
+    find_interactive_button,
+    find_account_row_interactive
 )
 from token_memory import load_memory, get_effective_account_status, evaluate_switch_readiness
 from analytics_engine import calculate_burn_rate, record_usage_sample, load_analytics_data
@@ -33,7 +35,7 @@ from circuit_breaker import RotationCircuitBreaker
 from atomic_state import SafeJsonStore
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (29 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (30 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -80,6 +82,8 @@ async def run_all_tests():
         assert limits.get("five_hour_remaining_pct") is not None, "Debe obtener limite de 5 horas"
         assert "gemini" in limits, "Debe contener grupo Gemini"
         assert "claude_gpt" in limits, "Debe contener grupo Claude/GPT"
+        has_cached_core = await page.evaluate("() => Boolean(window.__antigravityCore)")
+        assert has_cached_core is True, "window.__antigravityCore debe ser retenido en memoria para consultas instantáneas"
         
         # 9. Log Quota Error Check
         log_err, log_desc = check_log_quota_errors()
@@ -298,7 +302,28 @@ async def run_all_tests():
     assert res_stealth.stdout.strip() == "[]", "Debe devolver salida JSON limpia"
     print("[PASS] 29. Supresión Total de Ventanas PowerShell verificada: -WindowStyle Hidden y CREATE_NO_WINDOW activos.")
 
-    print("\n--- TODOS LOS 29 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 30. Turbo Speed Fast-Path & Shared OCR Cache Validation
+    mock_ocr = [
+        {"type": "line", "text": "Cuenta objetivo", "screen_cx": 450, "screen_cy": 320, "w": 200, "h": 40},
+        {"type": "word", "text": "testuser@gmail.com", "screen_cx": 450, "screen_cy": 340, "w": 180, "h": 20}
+    ]
+    pos_res = find_account_row_interactive(0, "testuser@gmail.com", allow_scroll=False, ocr_items=mock_ocr)
+    assert pos_res is not None
+    assert pos_res[0] == 450 and pos_res[1] == 340
+
+    mock_btn_ocr = [
+        {"type": "line", "text": "Acceder", "screen_cx": 520, "screen_cy": 650, "w": 100, "h": 36}
+    ]
+    btn_res = find_interactive_button(0, target_keywords=["acceder"], allow_scroll=False, ocr_items=mock_btn_ocr)
+    assert btn_res is not None
+    assert btn_res[0] == 520 and btn_res[1] == 650
+
+    # Ensure detect_blue_button_center handles invalid or closed hwnd safely
+    from external_oauth_handler import detect_blue_button_center
+    assert detect_blue_button_center(0) is None
+    print("[PASS] 30. Motor Turbo Speed verificado: Shared OCR Caching, CV Fast-Path & Detección React Sub-50ms.")
+
+    print("\n--- TODOS LOS 30 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

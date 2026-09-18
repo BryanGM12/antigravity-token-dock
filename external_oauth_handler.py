@@ -339,19 +339,19 @@ def get_browser_url(hwnd: int) -> str:
         activate_browser_window(hwnd)
         pyperclip.copy("")
         send_key_combination(hwnd, 0x11, ord('L'))
-        time.sleep(0.06)
+        time.sleep(0.03)
         send_key_combination(hwnd, 0x11, ord('C'))
 
         url = ""
         for _ in range(4):
-            time.sleep(0.05)
+            time.sleep(0.02)
             url = pyperclip.paste().strip()
             if url:
                 break
 
         # Dismiss address bar selection cleanly via Escape
         send_single_key(hwnd, 0x1B)  # VK_ESCAPE
-        time.sleep(0.04)
+        time.sleep(0.02)
         return url
     except Exception as e:
         logger.debug(f"Failed to copy browser URL: {e}")
@@ -368,23 +368,29 @@ def inject_url_in_browser(hwnd: int, new_url: str):
     activate_browser_window(hwnd)
     pyperclip.copy(new_url)
     send_key_combination(hwnd, 0x11, ord('L'))
-    time.sleep(0.06)
+    time.sleep(0.03)
     send_key_combination(hwnd, 0x11, ord('V'))
-    time.sleep(0.06)
+    time.sleep(0.03)
     send_single_key(hwnd, 0x0D)  # VK_RETURN
-    time.sleep(0.6)
+    time.sleep(0.12)
 
-def physical_click(x: int, y: int):
+def physical_click(x: int, y: int, fast: bool = True):
     """Moves physical cursor and fires mouse down/up on the interactive desktop."""
     switch_to_interactive_desktop()
     user32.SetCursorPos(x, y)
-    time.sleep(0.04)
     MOUSEEVENTF_LEFTDOWN = 0x0002
     MOUSEEVENTF_LEFTUP = 0x0004
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.04)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    time.sleep(0.06)
+    if fast:
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.015)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.02)
+    else:
+        time.sleep(0.02)
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.02)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.03)
 
 def focus_web_contents_safely(hwnd: int):
     """Clicks in empty margin on far right to safely focus document without clicking buttons or left sidebars (Comet/Arc)."""
@@ -665,7 +671,8 @@ def scroll_page_down(hwnd: int, steps: int = 4):
 def find_interactive_button(
     hwnd: int,
     target_keywords: Optional[List[str]] = None,
-    allow_scroll: bool = True
+    allow_scroll: bool = True,
+    ocr_items: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[Tuple[int, int, str]]:
     """
     Intelligent button recognition engine:
@@ -676,7 +683,8 @@ def find_interactive_button(
     Returns: (screen_x, screen_y, method_name) or None.
     """
     if not hwnd or not user32.IsWindow(hwnd):
-        return None
+        if not ocr_items:
+            return None
 
     if not target_keywords:
         target_keywords = [
@@ -685,64 +693,68 @@ def find_interactive_button(
             "iniciar sesion", "iniciar sesión", "continue as", "continuar como"
         ]
 
-    rect = wintypes.RECT()
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-        return None
-    win_h = rect.bottom - rect.top
+    win_h = 1000
+    if hwnd and user32.IsWindow(hwnd):
+        rect = wintypes.RECT()
+        if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            win_h = rect.bottom - rect.top
+        else:
+            return None
 
     for scroll_attempt in range(2 if allow_scroll else 1):
         # Strategy A: Fast CV Pill Buttons
-        pills = detect_pill_buttons_cv(hwnd)
+        pills = detect_pill_buttons_cv(hwnd) if (hwnd and user32.IsWindow(hwnd)) else []
 
-        # Strategy B: Semantic Native OCR
-        ocr_items = run_native_ocr(hwnd)
+        # Strategy B: Semantic Native OCR (use shared ocr_items on attempt 0 if provided!)
+        current_ocr = ocr_items if (ocr_items is not None and scroll_attempt == 0) else (run_native_ocr(hwnd) if (hwnd and user32.IsWindow(hwnd)) else [])
 
         # 1. Look for OCR matches for target keywords
         best_ocr_match = None
-        for item in ocr_items:
+        for item in current_ocr:
             txt = (item.get("text") or "").strip().lower()
             clean_txt = re.sub(r'[^a-z0-9áéíóúñ]', '', txt)
             for kw in target_keywords:
                 clean_kw = re.sub(r'[^a-z0-9áéíóúñ]', '', kw.lower())
                 if clean_kw in clean_txt or kw.lower() in txt:
                     # Prefer bottom-most match (action buttons sit at bottom of cards)
-                    score = item["screen_cy"] + (item["screen_cx"] // 3)
-                    if not best_ocr_match or score > best_ocr_match[0]:
-                        best_ocr_match = (score, item["screen_cx"], item["screen_cy"], item["text"])
+                    item_cy = item.get("screen_cy", 0)
+                    if not best_ocr_match or item_cy > best_ocr_match["screen_cy"]:
+                        best_ocr_match = item
 
-        # 2. Correlate OCR text with CV pill buttons if possible
-        if best_ocr_match and pills:
-            ocr_x, ocr_y = best_ocr_match[1], best_ocr_match[2]
-            for p in pills:
-                # If OCR text is inside or adjacent to a CV pill button (+- 60px)
-                if abs(p["screen_cx"] - ocr_x) < 70 and abs(p["screen_cy"] - ocr_y) < 35:
-                    logger.info(f"[SMART-LOCATOR] Botón verificado por CV+OCR: '{best_ocr_match[3]}' en ({p['screen_cx']}, {p['screen_cy']})")
-                    return p["screen_cx"], p["screen_cy"], f"cv_ocr_fusion:{best_ocr_match[3]}"
-
-        # 3. If OCR found a high confidence keyword
         if best_ocr_match:
-            logger.info(f"[SMART-LOCATOR] Botón reconocido por OCR: '{best_ocr_match[3]}' en ({best_ocr_match[1]}, {best_ocr_match[2]})")
-            return best_ocr_match[1], best_ocr_match[2], f"ocr:{best_ocr_match[3]}"
+            # Check if any CV pill encompasses or aligns with this OCR match
+            bx = best_ocr_match["screen_cx"]
+            by = best_ocr_match["screen_cy"]
+            for pill in pills:
+                px1 = pill["screen_cx"] - pill["w"] // 2
+                px2 = pill["screen_cx"] + pill["w"] // 2
+                py1 = pill["screen_cy"] - pill["h"] // 2
+                py2 = pill["screen_cy"] + pill["h"] // 2
+                if (px1 - 20 <= bx <= px2 + 20) and (py1 - 15 <= by <= py2 + 15):
+                    logger.info(f"[SMART-LOCATOR] Botón confirmado por fusión CV+OCR en ({pill['screen_cx']}, {pill['screen_cy']})")
+                    return pill["screen_cx"], pill["screen_cy"], "cv_ocr_fusion"
 
-        # 4. If CV found a solid pill button in the bottom region
-        if pills:
-            for p in pills:
-                if p["screen_cy"] > rect.top + (win_h * 0.35):
-                    logger.info(f"[SMART-LOCATOR] Botón reconocido por CV pill en ({p['screen_cx']}, {p['screen_cy']})")
-                    return p["screen_cx"], p["screen_cy"], "cv_pill_contour"
+            logger.info(f"[SMART-LOCATOR] Botón localizado puramente por OCR semántico en ({bx}, {by})")
+            return bx, by, "semantic_ocr"
 
-        # If not found on first glance and scroll allowed, reveal below-the-fold content
-        if scroll_attempt == 0 and allow_scroll:
+        # Strategy C: Pure CV fallback if high-confidence primary pill is visible in bottom half
+        for pill in pills:
+            if pill["screen_cy"] > win_h * 0.5 and pill["w"] > 70:
+                logger.info(f"[SMART-LOCATOR] Botón primario deducido por visión geométrica en ({pill['screen_cx']}, {pill['screen_cy']})")
+                return pill["screen_cx"], pill["screen_cy"], "cv_pill_geometric"
+
+        if scroll_attempt == 0 and allow_scroll and hwnd and user32.IsWindow(hwnd):
             logger.info("[SMART-LOCATOR] Botón no visible en pantalla actual; desplazando viewport hacia abajo...")
             scroll_page_down(hwnd, steps=4)
-            time.sleep(0.3)
+            time.sleep(0.15)
 
     return None
 
 def find_account_row_interactive(
     hwnd: int,
     target_email: str,
-    allow_scroll: bool = True
+    allow_scroll: bool = True,
+    ocr_items: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[Tuple[int, int, str]]:
     """
     Intelligently discovers and locates the target account row in the Google Account Chooser screen
@@ -750,7 +762,8 @@ def find_account_row_interactive(
     Returns: (screen_x, screen_y, method_name) or None.
     """
     if not hwnd or not user32.IsWindow(hwnd):
-        return None
+        if not ocr_items:
+            return None
 
     norm_email = target_email.strip().lower()
     user_part = norm_email.split("@")[0]
@@ -769,9 +782,9 @@ def find_account_row_interactive(
         pass
 
     for scroll_attempt in range(2 if allow_scroll else 1):
-        ocr_items = run_native_ocr(hwnd)
-        if ocr_items:
-            for item in ocr_items:
+        items = ocr_items if (ocr_items is not None and scroll_attempt == 0) else run_native_ocr(hwnd)
+        if items:
+            for item in items:
                 txt = (item.get("text") or "").strip().lower()
                 clean_txt = re.sub(r'[^a-z0-9]', '', txt)
 
@@ -784,17 +797,17 @@ def find_account_row_interactive(
         if scroll_attempt == 0 and allow_scroll:
             logger.info("[SMART-LOCATOR] Cuenta no visible en primera pasada; desplazando selector hacia abajo...")
             scroll_page_down(hwnd, steps=2)
-            time.sleep(0.3)
+            time.sleep(0.15)
 
     return None
 
-def find_and_toggle_permissions_checkbox(hwnd: int) -> bool:
+def find_and_toggle_permissions_checkbox(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] = None) -> bool:
     """
     Finds and toggles 'Seleccionar todo' / 'Select all' permission checkboxes
     using OCR text matching and UI Automation toggle patterns.
     """
-    ocr_items = run_native_ocr(hwnd)
-    for item in ocr_items:
+    items = ocr_items if ocr_items is not None else run_native_ocr(hwnd)
+    for item in items:
         txt = (item.get("text") or "").strip().lower()
         clean_txt = re.sub(r'[^a-z0-9]', '', txt)
         if any(w in clean_txt for w in ["seleccionartodo", "selectall", "seleccionar"]):
@@ -802,7 +815,7 @@ def find_and_toggle_permissions_checkbox(hwnd: int) -> bool:
             box_y = item["screen_cy"]
             logger.info(f"[OCR] Casilla 'Seleccionar todo' localizada en ({box_x}, {box_y}). Activando...")
             physical_click(box_x, box_y)
-            time.sleep(0.1)
+            time.sleep(0.05)
             return True
 
     # Try UIA CheckBoxControl
@@ -818,44 +831,56 @@ def find_and_toggle_permissions_checkbox(hwnd: int) -> bool:
                         if tg and tg.ToggleState == 0:
                             tg.Toggle()
                             logger.info(f"[UIA] Activada casilla de permisos: '{ctrl.Name}'")
-                            time.sleep(0.1)
+                            time.sleep(0.05)
                             return True
     except Exception:
         pass
     return False
 
-def confirm_consent_screen(hwnd: int) -> bool:
+def confirm_consent_screen(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] = None) -> bool:
     """
-    Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 6-tier engine:
-    Tier 0: Force-enables Chromium DOM accessibility via WM_GETOBJECT.
-    Tier 1: Checkbox & scope verification ('Seleccionar todo') via OCR + UIA.
-    Tier 2: Multi-Modal Intelligent Button Finder (CV pill + OCR semantic text + auto-scrolling).
-    Tier 3: Windows UI Automation inspection of buttons (Invoke / BoundingRectangle).
-    Tier 4: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
-    Tier 5: Direct button area focus and Enter / Space keystrokes.
+    Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 7-tier engine:
+    Tier 0: Fast-Path Computer Vision primary blue button detection (15ms instant click).
+    Tier 1: Force-enables Chromium DOM accessibility via WM_GETOBJECT.
+    Tier 2: Checkbox & scope verification ('Seleccionar todo') via OCR + UIA.
+    Tier 3: Multi-Modal Intelligent Button Finder (CV pill + OCR semantic text + auto-scrolling).
+    Tier 4: Windows UI Automation inspection of buttons (Invoke / BoundingRectangle).
+    Tier 5: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
+    Tier 6: Direct button area focus and Enter / Space keystrokes.
     """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
-    time.sleep(0.08)
+    time.sleep(0.04)
 
-    # Tier 0: Wake up Chromium DOM accessibility
+    # Tier 0: Fast-Path Instant CV Primary Blue Pill Button Detection (15ms)
+    blue_pos = detect_blue_button_center(hwnd)
+    if blue_pos:
+        bx, by = blue_pos
+        logger.info(f"[CV-FAST-PATH] Botón de acción detectado al instante en ({bx}, {by}). Clicando...")
+        physical_click(bx, by)
+        time.sleep(0.08)
+        physical_click(bx, by)
+        time.sleep(0.15)
+        return True
+
+    # Tier 1: Wake up Chromium DOM accessibility
     wake_up_chromium_accessibility(hwnd)
 
-    # Tier 1: Ensure permission checkboxes are selected
-    find_and_toggle_permissions_checkbox(hwnd)
+    # Tier 2: Ensure permission checkboxes are selected (using shared ocr_items if available)
+    find_and_toggle_permissions_checkbox(hwnd, ocr_items=ocr_items)
 
-    # Tier 2: Multi-Modal Intelligent Button Finder (CV + OCR + Scroll)
-    btn_target = find_interactive_button(hwnd, allow_scroll=True)
+    # Tier 3: Multi-Modal Intelligent Button Finder (CV + OCR + Scroll)
+    btn_target = find_interactive_button(hwnd, allow_scroll=True, ocr_items=ocr_items)
     if btn_target:
         bx, by, method = btn_target
         logger.info(f"[SMART-BUTTON] Clic ejecutado en botón reconocido ({method}) en ({bx}, {by})...")
         physical_click(bx, by)
-        time.sleep(0.2)
+        time.sleep(0.08)
         physical_click(bx, by)
-        time.sleep(0.5)
+        time.sleep(0.2)
         return True
 
-    # Tier 3: UI Automation Button Search
+    # Tier 4: UI Automation Button Search
     try:
         import uiautomation as auto
         window = auto.ControlFromHandle(hwnd)
@@ -870,7 +895,7 @@ def confirm_consent_screen(hwnd: int) -> bool:
                             inv = ctrl.GetInvokePattern()
                             if inv:
                                 inv.Invoke()
-                                time.sleep(0.5)
+                                time.sleep(0.2)
                                 return True
                         except Exception:
                             pass
@@ -880,12 +905,12 @@ def confirm_consent_screen(hwnd: int) -> bool:
                             cy = r.top + (r.bottom - r.top) // 2
                             logger.info(f"[UIA] Clic directo en botón '{ctrl.Name}' en ({cx}, {cy})")
                             physical_click(cx, cy)
-                            time.sleep(0.5)
+                            time.sleep(0.2)
                             return True
     except Exception as e:
         logger.debug(f"[UIA] Error buscando botón de consentimiento: {e}")
 
-    # Tier 4: Multi-Column Responsive Layout Physical Matrix
+    # Tier 5: Multi-Column Responsive Layout Physical Matrix
     rect = wintypes.RECT()
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         win_w = rect.right - rect.left
@@ -911,45 +936,49 @@ def confirm_consent_screen(hwnd: int) -> bool:
                 if by < rect.bottom and (rect.left < bx < rect.right):
                     logger.info(f"Targeting 'Acceder' at ({bx}, {by}) [is_wide={is_wide}]...")
                     physical_click(bx, by)
-                    time.sleep(0.08)
+                    time.sleep(0.04)
 
-    # Tier 5: Direct Button Area Focus and Keyboard Activation
+    # Tier 6: Direct Button Area Focus and Keyboard Activation
     if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         target_focus_x = cx + 440 if is_wide else cx + 150
         target_focus_y = max(rect.top + 400, rect.bottom - 75)
         physical_click(target_focus_x, target_focus_y)
-        time.sleep(0.06)
+        time.sleep(0.03)
 
     send_single_key(hwnd, 0x0D)  # VK_RETURN (Enter)
-    time.sleep(0.05)
+    time.sleep(0.03)
     send_single_key(hwnd, 0x20)  # VK_SPACE (Space)
-    time.sleep(0.3)
+    time.sleep(0.15)
     return True
 
-def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
+def select_account_via_centered_click(
+    hwnd: int,
+    target_email: str,
+    ocr_items: Optional[List[Dict[str, Any]]] = None
+) -> bool:
     """
     Selects target account in Google Account Chooser with 4-tier strategy:
-    1. Native Windows OCR semantic account row recognition.
+    1. Native Windows OCR semantic account row recognition (reusing ocr_items if available).
     2. UI Automation inspection (wakes up Chromium accessibility first).
     3. Calibrated dynamic vertical row calculation with card centering adaptation.
     4. Deterministic keyboard Tab navigation fallback.
     """
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
-    time.sleep(0.08)
+    time.sleep(0.04)
 
     # Tier 0: Wake up Chromium DOM accessibility
     wake_up_chromium_accessibility(hwnd)
 
     # Tier 1: Try Native Windows OCR account row discovery
-    acc_pos = find_account_row_interactive(hwnd, target_email)
+    acc_pos = find_account_row_interactive(hwnd, target_email, ocr_items=ocr_items)
     if acc_pos:
         ax, ay, method = acc_pos
         logger.info(f"[CHOOSER] Cuenta '{target_email}' localizada con éxito ({method}) en ({ax}, {ay}). Haciendo clic...")
         physical_click(ax, ay)
-        time.sleep(0.15)
+        time.sleep(0.08)
         physical_click(ax, ay)
-        time.sleep(0.6)
+        time.sleep(0.2)
         return True
 
     # Tier 2: Try exact UI Automation account row selection
@@ -979,9 +1008,9 @@ def select_account_via_centered_click(hwnd: int, target_email: str) -> bool:
 
     logger.info(f"Executing calibrated physical click on {target_email} (idx={idx}) at ({cx}, {row_y}) [win_h={win_h}]...")
     physical_click(cx, row_y)
-    time.sleep(0.15)
+    time.sleep(0.08)
     physical_click(cx, row_y)
-    time.sleep(0.6)
+    time.sleep(0.2)
     return True
 
 
@@ -1239,7 +1268,7 @@ def handle_external_google_signin(
                 logger.debug(f"[LOCK] Bound exclusively to OAuth HWND {hwnd}")
 
         if not hwnd:
-            time.sleep(0.2)
+            time.sleep(0.04)
             continue
 
         # Passive window title check (0ms overhead)
@@ -1248,12 +1277,12 @@ def handle_external_google_signin(
         user32.GetWindowTextW(hwnd, buff, length + 1)
         title = buff.value
 
-        # Check URL when needed (avoids focus-stealing Ctrl+L loop)
+        # Check URL when needed (fast-path immediate check on iteration 0)
         now = time.time()
         should_check_url = False
-        if not url_injected and (now - last_url_check > 0.8):
+        if not url_injected and (last_url_check == 0.0 or (now - last_url_check > 0.4)):
             should_check_url = True
-        elif (now - last_url_check > 3.0) and not any(w in title.lower() for w in ["auth success", "google antigravity auth success"]):
+        elif (now - last_url_check > 1.5) and not any(w in title.lower() for w in ["auth success", "google antigravity auth success"]):
             should_check_url = True
 
         if should_check_url:
@@ -1262,7 +1291,7 @@ def handle_external_google_signin(
 
             if "auth-success" in cached_url or ("localhost:" in cached_url and "code=" in cached_url):
                 logger.info(f"Authentication success detected in URL: {cached_url}")
-                time.sleep(0.2)
+                time.sleep(0.1)
                 close_browser_tab(hwnd)
                 logger.info("Closed authentication tab cleanly.")
                 return True
@@ -1275,14 +1304,14 @@ def handle_external_google_signin(
                         logger.info(f"Injecting direct OAuth URL with login_hint={target_email}...")
                         inject_url_in_browser(hwnd, direct_url)
                         url_injected = True
-                        time.sleep(0.4)
+                        time.sleep(0.15)
                         continue
 
         # Deterministic Screen Classification
         screen_type = classify_oauth_screen(hwnd, title=title, cached_url=cached_url)
         if screen_type == "SUCCESS":
             logger.info("Authentication success detected in browser!")
-            time.sleep(0.2)
+            time.sleep(0.1)
             close_browser_tab(hwnd)
             return True
 
@@ -1310,26 +1339,26 @@ def handle_external_google_signin(
             # Extend deadline by 120s from now so the user has sufficient time to complete verification
             effective_deadline = max(effective_deadline, time.time() + 120.0)
             logger.info(f"[CHALLENGE-WAIT] Esperando resolución del usuario en dispositivo... ({desc})")
-            time.sleep(1.5)
+            time.sleep(1.0)
             continue
 
         # 2. Handle Account Chooser screen
         if screen_type == "CHOOSER" and selection_attempts < 5:
             selection_attempts += 1
             logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
-            select_account_via_centered_click(hwnd, target_email)
+            select_account_via_centered_click(hwnd, target_email, ocr_items=ocr_items)
             account_selected = True
-            time.sleep(1.0)
+            time.sleep(0.15)
             continue
 
         # 3. Handle Consent / 'Acceder' screen
         if screen_type == "CONSENT" or (account_selected and selection_attempts > 0):
             logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
-            confirm_consent_screen(hwnd)
-            time.sleep(0.8)
+            confirm_consent_screen(hwnd, ocr_items=ocr_items)
+            time.sleep(0.15)
             continue
 
-        time.sleep(0.15)
+        time.sleep(0.04)
 
     # Final check on auth_event before declaring timeout
     if auth_event and auth_event.is_set():

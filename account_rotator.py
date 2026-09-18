@@ -115,14 +115,14 @@ async def sign_out(page: Page) -> bool:
         if not await is_authenticated_in_dom(page) or "/onboarding" in (page.url or ""):
             logger.info("Verified sign-out state via authService state machine immediately.")
             return True
-        for _ in range(24):
-            await asyncio.sleep(0.05)
+        for _ in range(40):
+            await asyncio.sleep(0.025)
             if not await is_authenticated_in_dom(page) or "/onboarding" in (page.url or ""):
                 logger.info("Verified sign-out state via authService state machine.")
                 return True
             if await entrance_btn.count() > 0 and await entrance_btn.first.is_visible():
                 return True
-        logger.warning("Programmatic logout dispatched but state did not flip within 1.2s; falling back to UI.")
+        logger.warning("Programmatic logout dispatched but state did not flip within 1.0s; falling back to UI.")
 
     # 2. Fallback Engine: UI Dialog & Modal Handling
     dialog_sign_in = page.locator('div[role="dialog"] button:has-text("Sign In"), div[role="dialog"] button:has-text("Iniciar sesión")')
@@ -381,7 +381,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     auth_event = threading.Event()
 
     async def poll_auth_success():
-        for _ in range(120):  # poll every 250ms up to 30s
+        for _ in range(600):  # poll every 30ms up to 18s
             if auth_event.is_set():
                 break
             try:
@@ -391,7 +391,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
                     break
             except Exception:
                 pass
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.03)
 
     poll_task = asyncio.create_task(poll_auth_success())
 
@@ -417,7 +417,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     authenticated = False
     browser = getattr(getattr(page, "context", None), "browser", None)
 
-    for _ in range(25):
+    for _ in range(50):
         if browser and browser.is_connected():
             try:
                 page = await ensure_active_page(browser, page)
@@ -426,13 +426,13 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         if await is_authenticated_in_dom(page):
             authenticated = True
             break
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.04)
         
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.05)
     
     # 7. Verify new account email (fast polling)
     new_email = None
-    for _ in range(15):
+    for _ in range(25):
         if browser and browser.is_connected():
             try:
                 page = await ensure_active_page(browser, page)
@@ -444,7 +444,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
                 break
         except Exception:
             pass
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.05)
         
     await close_settings(page)
     effective_new = new_email or target_email

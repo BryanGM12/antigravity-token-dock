@@ -26,20 +26,23 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
     """
     try:
         data = await page.evaluate(r'''async () => {
-            const allEls = document.querySelectorAll('*');
-            let core = null;
-            for (const el of allEls) {
-                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
-                if (!key) continue;
-                let cur = el[key];
-                while (cur) {
-                    if (cur.memoizedProps?.value?.core) {
-                        core = cur.memoizedProps.value.core;
-                        break;
+            let core = window.__antigravityCore;
+            if (!core) {
+                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                for (const el of candidates) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let cur = el[key];
+                    while (cur) {
+                        if (cur.memoizedProps?.value?.core) {
+                            core = cur.memoizedProps.value.core;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        cur = cur.return;
                     }
-                    cur = cur.return;
+                    if (core) break;
                 }
-                if (core) break;
             }
             if (!core) return null;
             
