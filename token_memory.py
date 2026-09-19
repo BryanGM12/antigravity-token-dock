@@ -118,8 +118,22 @@ def load_memory() -> Dict[str, Any]:
     if "sound_enabled" not in data:
         data["sound_enabled"] = True
         
-    # Ensure all default accounts exist
-    for acc in DEFAULT_ACCOUNTS:
+    # Dynamically resolve authorized accounts
+    try:
+        from config_manager import get_authorized_emails
+        auth_emails = get_authorized_emails()
+    except Exception:
+        auth_emails = DEFAULT_ACCOUNTS
+
+    # Prune retired accounts not in authorized list
+    auth_set = set(acc.lower().strip() for acc in auth_emails)
+    if auth_set:
+        stale_accounts = [acc for acc in list(data["accounts"].keys()) if acc.lower().strip() not in auth_set]
+        for stale in stale_accounts:
+            del data["accounts"][stale]
+
+    # Ensure all authorized accounts exist
+    for acc in auth_emails:
         if acc not in data["accounts"]:
             data["accounts"][acc] = _init_empty_account_record()
         else:

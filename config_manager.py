@@ -176,12 +176,20 @@ def add_account(
     return new_acc
 
 def remove_account(email: str) -> bool:
-    """Removes an account by email from the local configuration."""
+    """Removes an account by email from the local configuration and token memory."""
     accounts = load_accounts_config()
     norm_email = email.strip().lower()
     filtered = [acc for acc in accounts if acc.get("email", "").strip().lower() != norm_email]
     if len(filtered) != len(accounts):
         save_accounts_config(filtered)
+        try:
+            from token_memory import load_memory, save_memory
+            mem = load_memory()
+            if norm_email in mem.get("accounts", {}):
+                del mem["accounts"][norm_email]
+                save_memory(mem)
+        except Exception:
+            pass
         return True
     return False
 
