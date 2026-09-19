@@ -58,16 +58,39 @@ except Exception:
     def get_account_index(email: str):
         return 0
 
-def switch_to_interactive_desktop() -> bool:
-    """Switches current thread desktop to 'default' interactive desktop."""
+WINDOW_DESKTOP_MAP: Dict[int, str] = {}
+_ACTIVE_DESKTOP: str = "default"
+
+def get_all_station_desktops() -> List[str]:
+    """Returns all accessible desktop names on WinSta0."""
+    desktops = ["Default"]
     try:
-        h_desk = user32.OpenDesktopW('default', 0, False, 0x01FF)
+        hw = user32.OpenWindowStationW("WinSta0", False, 0x037F)
+        if hw:
+            def enum_d_cb(dname, lparam):
+                if dname and dname not in desktops:
+                    desktops.append(dname)
+                return True
+            user32.EnumDesktopsW(hw, ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.LPCWSTR, wintypes.LPARAM)(enum_d_cb), 0)
+            user32.CloseWindowStation(hw)
+    except Exception as e:
+        logger.debug(f"Failed to enumerate desktops: {e}")
+    return desktops
+
+def switch_to_interactive_desktop(desktop_name: Optional[str] = None) -> bool:
+    """Switches current thread desktop to the target or 'default' interactive desktop."""
+    global _ACTIVE_DESKTOP
+    target_d = desktop_name or _ACTIVE_DESKTOP or "default"
+    try:
+        h_desk = user32.OpenDesktopW(target_d, 0, False, 0x01FF)
         if not h_desk:
             return False
         res = user32.SetThreadDesktop(h_desk)
+        if res:
+            _ACTIVE_DESKTOP = target_d
         return bool(res)
     except Exception as e:
-        logger.debug(f"Failed to switch thread desktop: {e}")
+        logger.debug(f"Failed to switch thread desktop to {target_d}: {e}")
         return False
 
 def get_default_browser_info() -> Tuple[str, str]:
@@ -105,10 +128,9 @@ def get_default_browser_info() -> Tuple[str, str]:
 def get_browser_windows(target_process_name: Optional[str] = None) -> List[Tuple[int, int, str]]:
     """
     Returns list of (hwnd, pid, title) for visible windows belonging strictly to target_process_name
-    (defaults to the system default browser if None).
+    across all desktops on WinSta0 (including sandboxed desktops used by Comet/Chromium).
     Guarantees that windows from other browsers (e.g. Chrome, Brave, Edge) are 100% ignored.
     """
-    switch_to_interactive_desktop()
     if not target_process_name:
         target_process_name, _ = get_default_browser_info()
     target_process_name = target_process_name.lower()
@@ -127,6 +149,7 @@ def get_browser_windows(target_process_name: Optional[str] = None) -> List[Tuple
         return []
 
     windows: List[Tuple[int, int, str]] = []
+    current_desktop_scanning = "default"
 
     def enum_cb(hwnd, lparam):
         if not user32.IsWindowVisible(hwnd):
@@ -149,10 +172,21 @@ def get_browser_windows(target_process_name: Optional[str] = None) -> List[Tuple
             h = rect.bottom - rect.top
             if w > 200 and h > 150:
                 windows.append((hwnd, pid.value, title))
+                WINDOW_DESKTOP_MAP[hwnd] = current_desktop_scanning
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+    desktops = get_all_station_desktops()
+    for dname in desktops:
+        h_desk = user32.OpenDesktopW(dname, 0, False, 0x01FF)
+        if not h_desk:
+            continue
+        current_desktop_scanning = dname
+        try:
+            user32.EnumDesktopWindows(h_desk, WNDENUMPROC(enum_cb), 0)
+        finally:
+            user32.CloseDesktop(h_desk)
+
     return windows
 
 def capture_browser_hwnds(target_process_name: Optional[str] = None) -> Set[int]:
@@ -247,6 +281,77 @@ def activate_browser_window(hwnd: int) -> bool:
     user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
     time.sleep(0.08)
     return bool(res)
+
+def force_foreground_window(hwnd: int) -> bool:
+    """
+    Forcefully brings hwnd to the foreground bypassing Windows focus-stealing prevention.
+    Uses AttachThreadInput, SW_RESTORE, BringWindowToTop, and SetForegroundWindow.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+
+    switch_to_interactive_desktop()
+    user32.AllowSetForegroundWindow(-1)
+
+    # If minimized, restore it; otherwise ensure it is shown
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    else:
+        user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+    user32.BringWindowToTop(hwnd)
+
+    cur_thread = kernel32.GetCurrentThreadId()
+    target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+    if cur_thread != target_thread:
+        user32.AttachThreadInput(cur_thread, target_thread, True)
+        res = user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+        user32.AttachThreadInput(cur_thread, target_thread, False)
+    else:
+        res = user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+
+    # Windows Alt-key bypass backup
+    VK_MENU = 0x12
+    KEYEVENTF_KEYUP = 0x0002
+    user32.keybd_event(VK_MENU, 0, 0, 0)
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+    time.sleep(0.08)
+    return bool(res)
+
+def focus_challenge_input_field(hwnd: int) -> bool:
+    """
+    Discovers and focuses primary input field (PIN/Code/Password) on a Google verification challenge screen.
+    Uses UI Automation EditControl search and falls back to tab navigation.
+    """
+    try:
+        import uiautomation as auto
+        window = auto.ControlFromHandle(hwnd)
+        if window.Exists(0, 0):
+            for ctrl, _ in auto.WalkTree(window, maxDepth=16):
+                if ctrl.ControlTypeName == "EditControl":
+                    logger.info(f"[CHALLENGE-FOCUS] Campo de entrada detectado: '{ctrl.Name}' (ClassName: {ctrl.ClassName}). Enfocando...")
+                    try:
+                        ctrl.SetFocus()
+                    except Exception:
+                        pass
+                    r = ctrl.BoundingRectangle
+                    if r and (r.right - r.left) > 0 and (r.bottom - r.top) > 0:
+                        cx = r.left + (r.right - r.left) // 2
+                        cy = r.top + (r.bottom - r.top) // 2
+                        physical_click(cx, cy)
+                        time.sleep(0.05)
+                        return True
+    except Exception as e:
+        logger.debug(f"[CHALLENGE-FOCUS] UIA EditControl no localizado: {e}")
+
+    # Fallback: Tab navigation to first interactive control
+    send_single_key(hwnd, 0x09)  # VK_TAB
+    time.sleep(0.04)
+    return False
 
 def send_key_combination(hwnd: int, vk_ctrl: int, vk_key: int):
     """Sends Ctrl + Key combination to the target browser window."""
@@ -784,15 +889,23 @@ def find_account_row_interactive(
     for scroll_attempt in range(2 if allow_scroll else 1):
         items = ocr_items if (ocr_items is not None and scroll_attempt == 0) else run_native_ocr(hwnd)
         if items:
+            # Pass 1: Strict email / username match (100% distinct per account, zero ambiguity)
             for item in items:
                 txt = (item.get("text") or "").strip().lower()
                 clean_txt = re.sub(r'[^a-z0-9]', '', txt)
+                if clean_user in clean_txt or user_part in txt or norm_email in txt:
+                    logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por coincidencia exacta de correo/usuario ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
+                    return item["screen_cx"], item["screen_cy"], f"ocr_exact_email:{item['text']}"
 
+            # Pass 2: Fallback to specific alias keywords
+            for item in items:
+                txt = (item.get("text") or "").strip().lower()
+                clean_txt = re.sub(r'[^a-z0-9]', '', txt)
                 for kw in alias_keywords:
                     clean_kw = re.sub(r'[^a-z0-9]', '', kw)
-                    if len(clean_kw) >= 3 and (clean_kw in clean_txt or kw in txt):
-                        logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por OCR ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
-                        return item["screen_cx"], item["screen_cy"], f"ocr_account:{item['text']}"
+                    if len(clean_kw) >= 4 and (clean_kw in clean_txt or kw in txt):
+                        logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por alias ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
+                        return item["screen_cx"], item["screen_cy"], f"ocr_alias:{item['text']}"
 
         if scroll_attempt == 0 and allow_scroll:
             logger.info("[SMART-LOCATOR] Cuenta no visible en primera pasada; desplazando selector hacia abajo...")
@@ -840,6 +953,7 @@ def find_and_toggle_permissions_checkbox(hwnd: int, ocr_items: Optional[List[Dic
 def confirm_consent_screen(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] = None) -> bool:
     """
     Confirms Google OAuth consent screen ('Acceder' / 'Continuar' / 'Allow') with 7-tier engine:
+    Safety Guard: Rejects execution if active screen is a security challenge or code verification.
     Tier 0: Fast-Path Computer Vision primary blue button detection (15ms instant click).
     Tier 1: Force-enables Chromium DOM accessibility via WM_GETOBJECT.
     Tier 2: Checkbox & scope verification ('Seleccionar todo') via OCR + UIA.
@@ -848,6 +962,13 @@ def confirm_consent_screen(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] 
     Tier 5: Multi-column responsive layout geometry matrix (Dual-Column vs Single-Column).
     Tier 6: Direct button area focus and Enter / Space keystrokes.
     """
+    # Safety guard: Never confirm consent if the screen is requesting a verification code or challenge!
+    if ocr_items:
+        ch = extract_verification_challenge_details(ocr_items, cached_url="")
+        if ch.get("is_challenge"):
+            logger.warning(f"[SAFETY-GUARD] Bloqueada confirmación de consentimiento: se detectó desafío activo ({ch.get('challenge_type')}).")
+            return False
+
     switch_to_interactive_desktop()
     activate_browser_window(hwnd)
     time.sleep(0.04)
@@ -1022,7 +1143,7 @@ def extract_verification_challenge_details(
     """
     Deterministically detects and extracts structured Google OAuth verification challenge details:
     Detects 2FA, phone prompts ("Toca el número XX"), SMS/Authenticator codes, passwords,
-    recovery emails, passkeys, and captchas.
+    recovery emails, passkeys, captchas, and challenge errors ("Código incorrecto").
     """
     t_lower = (title or "").lower()
     u_lower = (cached_url or "").lower()
@@ -1034,13 +1155,21 @@ def extract_verification_challenge_details(
     prompt_number: Optional[str] = None
     device_name: Optional[str] = None
 
+    # Error detection: Check if user entered an incorrect code or expired code
+    has_error = any(k in c_lower for k in [
+        "código incorrecto", "codigo incorrecto", "wrong code", "código erróneo", "codigo erroneo",
+        "no coincide", "no coinciden", "vuelve a intentarlo", "inténtalo de nuevo", "intentalo de nuevo",
+        "introduce un código válido", "introduce un codigo valido", "código no válido", "codigo no valido",
+        "demasiados intentos fallidos", "demasiados intentos", "inténtalo más tarde", "intentalo mas tarde"
+    ])
+
     # 1. Phone Prompt / Device Challenge ("Comprueba tu teléfono", "Toca XX", "Tap Yes")
     phone_keywords = [
         "comprueba tu teléfono", "comprueba tu telefono", "check your phone",
         "toca sí", "toca si", "tap yes", "toca el número", "toca el numero",
         "tap the number", "notificación a tu", "notificacion a tu", "notification to your",
-        "abre la app", "abre la aplicación", "open the gmail", "open the youtube",
-        "google prompt"
+        "abre la app de gmail", "abre la app de youtube", "abre la aplicación", "abre la app",
+        "open the gmail app", "open the youtube app", "google prompt"
     ]
     is_phone_url = any(k in u_lower for k in ["challenge/ipp", "challenge/az", "challenge/dp"])
     is_phone_title = any(k in t_lower for k in ["comprueba tu tel", "check your phone"])
@@ -1077,52 +1206,85 @@ def extract_verification_challenge_details(
         if m_dev:
             device_name = m_dev.group(1).strip()
 
-    # 2. Code / 2FA Challenge (SMS or Authenticator)
+    # 2. Code / 2FA Challenge (SMS or Authenticator or Email or Backup Code)
     elif any(k in c_lower for k in [
         "introduce el código", "introduce el codigo", "enter the code",
+        "introduce un código", "introduce un codigo", "enter a code",
+        "escribe el código", "escribe el codigo", "type the code",
+        "ingresa el código", "ingresa el codigo", "ingresa tu código", "ingresa tu codigo",
         "código de verificación", "codigo de verificacion", "verification code",
-        "authenticator", "mensaje de texto", "text message",
-        "6 dígitos", "6 digitos", "6-digit code",
-        "código de seguridad", "codigo de seguridad", "ingresa el código", "ingresa el codigo"
-    ]) or any(k in u_lower for k in ["challenge/totp", "challenge/sms", "challenge/oob"]):
+        "authenticator", "google authenticator", "app de autenticación", "app de autenticacion",
+        "mensaje de texto", "text message", "sms",
+        "6 dígitos", "6 digitos", "6-digit code", "6 digit", "seis dígitos", "seis digitos",
+        "8 dígitos", "8 digitos", "8-digit code", "8 digit", "ocho dígitos", "ocho digitos",
+        "código de seguridad", "codigo de seguridad", "security code",
+        "código de respaldo", "codigo de respaldo", "backup code",
+        "código de recuperación", "codigo de recuperacion",
+        "código g-", "codigo g-", "g-", "g -",
+        "código temporal", "codigo temporal",
+        "recibir un código", "recibir un codigo",
+        "obtener un código", "obtener un codigo",
+        "reenviar código", "reenviar codigo", "volver a enviar código", "volver a enviar el codigo",
+        "se ha enviado un código", "se ha enviado un codigo", "hemos enviado un código", "hemos enviado un codigo"
+    ]) or (bool(re.search(r'\bc[oó]digo\b', c_lower)) and bool(re.search(r'd[íi]gito|sms|texto|verific|seguridad|authen|seguro|g\-|enviad|recib|ingres|escrib|introdu', c_lower))) or \
+       any(k in u_lower for k in [
+           "challenge/totp", "challenge/sms", "challenge/oob", "challenge/bc",
+           "challenge/idv", "challenge/wa", "challenge/voice", "challenge/opt"
+       ]):
         challenge_type = "CHALLENGE_CODE"
 
-    # 3. Password Challenge
+    # 3. Challenge Selection ("¿Cómo quieres verificar tu identidad?")
+    elif any(k in c_lower for k in [
+        "cómo quieres iniciar sesión", "como quieres iniciar sesion",
+        "cómo quieres verificar", "como quieres verificar",
+        "elige cómo verificar", "elige como verificar",
+        "choose how you want to sign in", "choose how to verify",
+        "probar de otra manera", "probar otra manera", "try another way",
+        "más opciones de verificación", "mas opciones de verificacion"
+    ]) or "challenge/selection" in u_lower:
+        challenge_type = "CHALLENGE_SELECTION"
+
+    # 4. Password Challenge
     elif any(k in c_lower for k in [
         "introduce tu contraseña", "introduce tu contrasena", "enter your password",
         "escribe tu contraseña", "escribe tu contrasena",
-        "confirma tu contraseña", "confirma tu contrasena"
+        "confirma tu contraseña", "confirma tu contrasena",
+        "ingresa tu contraseña", "ingresa tu contrasena"
     ]) or "challenge/pwd" in u_lower:
         challenge_type = "CHALLENGE_PASSWORD"
 
-    # 4. Recovery Challenge
+    # 5. Recovery Challenge
     elif any(k in c_lower for k in [
         "correo de recuperación", "correo de recuperacion", "recovery email",
         "teléfono de recuperación", "telefono de recuperacion", "recovery phone"
     ]) or "challenge/recovery" in u_lower:
         challenge_type = "CHALLENGE_RECOVERY"
 
-    # 5. Passkey / Security Key
+    # 6. Passkey / Security Key
     elif any(k in c_lower for k in [
         "llave de seguridad", "security key", "llave de paso",
         "passkey", "huella digital", "bloqueo de pantalla"
     ]) or any(k in u_lower for k in ["challenge/kpe", "challenge/pk"]):
         challenge_type = "CHALLENGE_PASSKEY"
 
-    # 6. Captcha / Bot Challenge
+    # 7. Captcha / Bot Challenge
     elif any(k in c_lower for k in [
         "escribe los caracteres", "type the characters", "captcha",
         "tráfico inusual", "trafico inusual", "actividad sospechosa"
     ]) or "challenge/captcha" in u_lower:
         challenge_type = "CHALLENGE_CAPTCHA"
 
-    # 7. Generic 2-Step Verification
+    # 8. Generic 2-Step Verification
     elif any(k in c_lower for k in [
         "verificación en 2 pasos", "verificacion en dos pasos",
         "verificación de dos pasos", "verificacion de dos pasos",
         "2-step verification", "verificar tu identidad",
-        "más formas de verificar", "mas formas de verificar"
-    ]) or any(k in t_lower for k in ["verificación", "verification"]) or "signin/challenge" in u_lower:
+        "más formas de verificar", "mas formas de verificar",
+        "confirma que eres tú", "confirma que eres tu", "confirm it's you",
+        "para continuar, primero confirma", "para proteger tu cuenta",
+        "to help keep your account safe"
+    ]) or any(k in t_lower for k in ["verificación", "verification", "seguridad", "security"]) or \
+       "signin/challenge" in u_lower or "/challenge/" in u_lower:
         challenge_type = "CHALLENGE_GENERIC"
 
     if not challenge_type:
@@ -1132,7 +1294,8 @@ def extract_verification_challenge_details(
             "prompt_number": None,
             "device_name": None,
             "description": "",
-            "raw_text": raw_text
+            "raw_text": raw_text,
+            "has_error": False
         }
 
     # Build human-readable Spanish description
@@ -1144,7 +1307,9 @@ def extract_verification_challenge_details(
             dev_str = f" a tu {device_name}" if device_name else " a tu teléfono"
             desc = f"Google envió una notificación{dev_str}. Toca 'Sí' para confirmar."
     elif challenge_type == "CHALLENGE_CODE":
-        desc = "Introduce el código de verificación de 6 dígitos (SMS o Google Authenticator)."
+        desc = "Introduce el código de verificación de 6 dígitos (SMS o Google Authenticator) en el navegador."
+    elif challenge_type == "CHALLENGE_SELECTION":
+        desc = "Elige tu método de verificación preferido (SMS, Authenticator, etc.) en el navegador."
     elif challenge_type == "CHALLENGE_PASSWORD":
         desc = "Introduce la contraseña de tu cuenta de Google en la ventana del navegador."
     elif challenge_type == "CHALLENGE_RECOVERY":
@@ -1162,7 +1327,8 @@ def extract_verification_challenge_details(
         "prompt_number": prompt_number,
         "device_name": device_name,
         "description": desc,
-        "raw_text": raw_text
+        "raw_text": raw_text,
+        "has_error": has_error
     }
 
 
@@ -1175,16 +1341,18 @@ def classify_oauth_screen(
     """
     Deterministically classifies the current state of the Google OAuth page:
     Returns: 'SUCCESS' | 'CHOOSER' | 'CONSENT' | 'CHALLENGE_PHONE_PROMPT' |
-             'CHALLENGE_CODE' | 'CHALLENGE_PASSWORD' | 'CHALLENGE_RECOVERY' |
-             'CHALLENGE_PASSKEY' | 'CHALLENGE_CAPTCHA' | 'CHALLENGE_GENERIC' | 'UNKNOWN'
+             'CHALLENGE_CODE' | 'CHALLENGE_SELECTION' | 'CHALLENGE_PASSWORD' |
+             'CHALLENGE_RECOVERY' | 'CHALLENGE_PASSKEY' | 'CHALLENGE_CAPTCHA' |
+             'CHALLENGE_GENERIC' | 'UNKNOWN'
     """
     t_lower = (title or "").lower()
     u_lower = (cached_url or "").lower()
 
     # 1. Immediate Success check (Title or URL redirect)
-    if any(w in t_lower for w in ["auth success", "google antigravity auth success"]) or \
-       "auth-success" in u_lower or ("localhost:" in u_lower and "code=" in u_lower) or \
-       ("127.0.0.1:" in u_lower and "code=" in u_lower):
+    if any(w in t_lower for w in ["auth success", "google antigravity auth success", "autenticación exitosa", "autenticacion exitosa"]) or \
+       "auth-success" in u_lower or "auth_success" in u_lower or \
+       ("localhost:" in u_lower and "code=" in u_lower) or \
+       ("127.0.0.1:" in u_lower and ("code=" in u_lower or "oauth2callback" in u_lower)):
         return "SUCCESS"
 
     # 2. Check Challenge / 2FA Verification (URL, Title, or OCR)
@@ -1201,7 +1369,7 @@ def classify_oauth_screen(
     # 4. Passive Title analysis
     if any(w in t_lower for w in ["elige una cuenta", "elegir una cuenta", "choose an account"]):
         return "CHOOSER"
-    if any(w in t_lower for w in ["solicita acceso", "wants access", "permisos"]):
+    if any(w in t_lower for w in ["solicita acceso", "wants access"]):
         return "CONSENT"
 
     # 5. Deep Semantic OCR analysis
@@ -1209,7 +1377,10 @@ def classify_oauth_screen(
         combined_text = " ".join((item.get("text") or "").lower() for item in ocr_items)
         if any(w in combined_text for w in ["elige una cuenta", "choose an account", "usar otra cuenta", "use another account"]):
             return "CHOOSER"
-        if any(w in combined_text for w in ["solicita acceso", "quiere acceder", "seleccionar todo", "google cloud", "developer", "continuar", "acceder"]):
+        if any(w in combined_text for w in [
+            "solicita acceso", "quiere acceder a tu cuenta", "wants access",
+            "seleccionar todo", "google cloud sdk", "developer platform"
+        ]):
             return "CONSENT"
 
     return "UNKNOWN"
@@ -1265,7 +1436,9 @@ def handle_external_google_signin(
             hwnd = find_target_oauth_window(pre_hwnds=pre_hwnds, target_process_name=target_process)
             if hwnd:
                 locked_hwnd = hwnd
-                logger.debug(f"[LOCK] Bound exclusively to OAuth HWND {hwnd}")
+                win_desktop = WINDOW_DESKTOP_MAP.get(hwnd, "default")
+                switch_to_interactive_desktop(win_desktop)
+                logger.info(f"[LOCK] Bound exclusively to OAuth HWND {hwnd} on desktop '{win_desktop}'")
 
         if not hwnd:
             time.sleep(0.04)
@@ -1289,7 +1462,9 @@ def handle_external_google_signin(
             last_url_check = now
             cached_url = get_browser_url(hwnd)
 
-            if "auth-success" in cached_url or ("localhost:" in cached_url and "code=" in cached_url):
+            if "auth-success" in cached_url or "auth_success" in cached_url or \
+               ("localhost:" in cached_url and "code=" in cached_url) or \
+               ("127.0.0.1:" in cached_url and ("code=" in cached_url or "oauth2callback" in cached_url)):
                 logger.info(f"Authentication success detected in URL: {cached_url}")
                 time.sleep(0.1)
                 close_browser_tab(hwnd)
@@ -1322,24 +1497,46 @@ def handle_external_google_signin(
 
         # 1. Handle Google Verification Challenges (Phone prompt, SMS, Authenticator, Password, etc.)
         if screen_type.startswith("CHALLENGE") or screen_type == "SIGNIN_FORM":
+            # Bring browser window to the foreground so the user sees the challenge clearly
+            force_foreground_window(hwnd)
+
             ch_details = extract_verification_challenge_details(ocr_items, title=title, cached_url=cached_url)
             p_num = ch_details.get("prompt_number")
             desc = ch_details.get("description") or "Google requiere verificación adicional."
+            has_err = ch_details.get("has_error", False)
 
-            if not challenge_notified or (p_num and p_num != last_prompt_number):
+            # If it's a code, password, or generic challenge, focus the input field
+            if screen_type in ["CHALLENGE_CODE", "CHALLENGE_PASSWORD", "CHALLENGE_GENERIC"]:
+                focus_challenge_input_field(hwnd)
+
+            if not challenge_notified or (p_num and p_num != last_prompt_number) or has_err:
                 challenge_notified = True
                 last_prompt_number = p_num
-                logger.warning(f"✦ [VERIFICACIÓN GOOGLE REQUERIDA] {desc} (Cuenta: {target_email})")
                 try:
-                    from notification_service import notify_verification_required
-                    notify_verification_required(target_email, screen_type, details=desc, prompt_number=p_num)
-                except Exception as ne:
-                    logger.debug(f"Error enviando notificación toast: {ne}")
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                except Exception:
+                    pass
 
-            # Extend deadline by 120s from now so the user has sufficient time to complete verification
-            effective_deadline = max(effective_deadline, time.time() + 120.0)
-            logger.info(f"[CHALLENGE-WAIT] Esperando resolución del usuario en dispositivo... ({desc})")
-            time.sleep(1.0)
+                if has_err:
+                    logger.warning(f"✦ [ERROR DE CÓDIGO GOOGLE] El código introducido es incorrecto o ha expirado. (Cuenta: {target_email})")
+                    try:
+                        from notification_service import notify_verification_required
+                        notify_verification_required(target_email, "CHALLENGE_CODE_ERROR", details="Código incorrecto o inválido. Introdúcelo de nuevo en el navegador.")
+                    except Exception as ne:
+                        logger.debug(f"Error enviando notificación toast: {ne}")
+                else:
+                    logger.warning(f"✦ [VERIFICACIÓN GOOGLE REQUERIDA] {desc} (Cuenta: {target_email})")
+                    try:
+                        from notification_service import notify_verification_required
+                        notify_verification_required(target_email, screen_type, details=desc, prompt_number=p_num)
+                    except Exception as ne:
+                        logger.debug(f"Error enviando notificación toast: {ne}")
+
+            # Extend deadline by 180s from now so the user has sufficient time to complete verification
+            effective_deadline = max(effective_deadline, time.time() + 180.0)
+            logger.info(f"[CHALLENGE-WAIT] Ventana activa en primer plano. Esperando resolución del usuario... ({desc})")
+            time.sleep(0.8)
             continue
 
         # 2. Handle Account Chooser screen
@@ -1351,8 +1548,8 @@ def handle_external_google_signin(
             time.sleep(0.15)
             continue
 
-        # 3. Handle Consent / 'Acceder' screen
-        if screen_type == "CONSENT" or (account_selected and selection_attempts > 0):
+        # 3. Handle Consent / 'Acceder' screen (STRICT: only when screen_type is CONSENT!)
+        if screen_type == "CONSENT":
             logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
             confirm_consent_screen(hwnd, ocr_items=ocr_items)
             time.sleep(0.15)

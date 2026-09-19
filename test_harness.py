@@ -256,6 +256,33 @@ async def run_all_tests():
     assert det_code["is_challenge"] is True
     assert det_code["challenge_type"] == "CHALLENGE_CODE"
 
+    # Test Code Variants ("Introduce un código", G-XXXXXX)
+    sample_gcode_ocr = [
+        {"type": "line", "text": "Introduce un código de 6 dígitos"},
+        {"type": "line", "text": "G-492102"}
+    ]
+    det_gcode = extract_verification_challenge_details(sample_gcode_ocr)
+    assert det_gcode["is_challenge"] is True
+    assert det_gcode["challenge_type"] == "CHALLENGE_CODE"
+
+    # Test Code Error Detection ("Código incorrecto")
+    sample_err_ocr = [
+        {"type": "line", "text": "Introduce el código"},
+        {"type": "line", "text": "Código incorrecto. Vuelve a intentarlo."}
+    ]
+    det_err = extract_verification_challenge_details(sample_err_ocr)
+    assert det_err["is_challenge"] is True
+    assert det_err["has_error"] is True
+
+    # Test Challenge Selection ("¿Cómo quieres iniciar sesión?")
+    sample_sel_ocr = [
+        {"type": "line", "text": "Elige cómo quieres verificar tu identidad"},
+        {"type": "line", "text": "Probar de otra manera"}
+    ]
+    det_sel = extract_verification_challenge_details(sample_sel_ocr)
+    assert det_sel["is_challenge"] is True
+    assert det_sel["challenge_type"] == "CHALLENGE_SELECTION"
+
     # Test Password re-entry
     sample_pwd_ocr = [
         {"type": "line", "text": "Introduce tu contraseña para continuar"}
@@ -267,11 +294,18 @@ async def run_all_tests():
     # Test classify_oauth_screen integration with challenges
     assert classify_oauth_screen(0, ocr_items=sample_phone_ocr) == "CHALLENGE_PHONE_PROMPT"
     assert classify_oauth_screen(0, ocr_items=sample_code_ocr) == "CHALLENGE_CODE"
+    assert classify_oauth_screen(0, ocr_items=sample_sel_ocr) == "CHALLENGE_SELECTION"
     assert classify_oauth_screen(0, ocr_items=sample_pwd_ocr) == "CHALLENGE_PASSWORD"
+
+    # Test confirm_consent_screen safety guard (rejects clicking buttons on challenge screens)
+    from external_oauth_handler import confirm_consent_screen
+    assert confirm_consent_screen(0, ocr_items=sample_code_ocr) is False, "El safety guard debe bloquear confirmación en pantallas de desafío"
 
     # Test Toast notification dispatch without error
     notify_verification_required("test@gmail.com", "CHALLENGE_PHONE_PROMPT", prompt_number="74")
-    print("[PASS] 28. Detector Autónomo de Verificaciones Google y Extracción de Números verificado.")
+    notify_verification_required("test@gmail.com", "CHALLENGE_CODE")
+    notify_verification_required("test@gmail.com", "CHALLENGE_CODE_ERROR")
+    print("[PASS] 28. Detector Autónomo de Verificaciones Google, Errores de Código y Safety Guard verificado.")
 
     # 29. Supresión Total de Ventanas de Consola PowerShell (Stealth Execution)
     import subprocess

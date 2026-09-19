@@ -126,12 +126,16 @@ def notify_verification_required(
     title = f"✦ Antigravity: Verificación de Google ({acc_name})"
 
     c_upper = (challenge_type or "").upper()
-    if ("PHONE_PROMPT" in c_upper or "DEVICE" in c_upper) and prompt_number:
+    if "CODE_ERROR" in c_upper:
+        msg = "Código incorrecto o expirado. Por favor revísalo e ingrésalo de nuevo en el navegador."
+    elif ("PHONE_PROMPT" in c_upper or "DEVICE" in c_upper) and prompt_number:
         msg = f"Toca el número {prompt_number} en tu teléfono para autorizar el acceso."
     elif "PHONE_PROMPT" in c_upper or "DEVICE" in c_upper:
         msg = "Comprueba tu teléfono y pulsa 'Sí' en la notificación de Google."
+    elif "SELECTION" in c_upper:
+        msg = "Elige tu método de verificación preferido (SMS, Authenticator, etc.) en el navegador."
     elif "CODE" in c_upper or "2FA" in c_upper or "TOTP" in c_upper:
-        msg = "Introduce el código de verificación (SMS o Google Authenticator)."
+        msg = "Introduce el código de verificación (SMS o Google Authenticator) en el navegador y pulsa Enter."
     elif "PASSWORD" in c_upper or "PWD" in c_upper:
         msg = "Introduce la contraseña de la cuenta en el navegador para continuar."
     elif "RECOVERY" in c_upper:

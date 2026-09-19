@@ -149,13 +149,14 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
         is_ex = False
         g_5h = gemini_data.get("five_hour_remaining_pct")
         g_wk = gemini_data.get("weekly_remaining_pct")
-        if (g_5h is not None and g_5h <= 0) or (g_wk is not None and g_wk <= 0):
+        effective_5h = g_5h if g_5h is not None else g_wk
+        if (effective_5h is not None and effective_5h <= 0) or (g_wk is not None and g_wk <= 0):
             is_ex = True
             
         limits = {
             "email": resolved_email,
-            "weekly_remaining_pct": gemini_data.get("weekly_remaining_pct"),
-            "five_hour_remaining_pct": gemini_data.get("five_hour_remaining_pct"),
+            "weekly_remaining_pct": g_wk,
+            "five_hour_remaining_pct": effective_5h,
             "weekly_refresh_text": gemini_data.get("weekly_refresh_text"),
             "five_hour_refresh_text": gemini_data.get("five_hour_refresh_text"),
             "weekly_reset_time": gemini_data.get("weekly_reset_time"),
