@@ -222,12 +222,18 @@ async def run_single_switch(target_email: Optional[str] = None):
             # Ensure dark theme is maintained
             await ensure_dark_theme(page)
             
-            # Save active conversation ID
+            # Save active conversation ID (with disk fallback)
             conv_id = await get_active_conversation_id(page)
+            if not conv_id:
+                try:
+                    from token_memory import load_memory
+                    conv_id = load_memory().get("last_active_conversation_id")
+                except Exception:
+                    pass
             logger.info(f"Saved active conversation ID before switch: {conv_id}")
             
             # Perform rotation (auto_prompt=False to preserve clean chat state on manual switch)
-            success, prev, new_acc = await rotate_account(page, ctx, target_email=target_email, auto_prompt=False)
+            success, prev, new_acc = await rotate_account(page, ctx, target_email=target_email, auto_prompt=False, conv_id=conv_id)
             if success:
                 logger.info(f"Account rotation successful: {prev} -> {new_acc}")
                 # Record analytics & send toast
@@ -361,6 +367,14 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                             st.get("five_hour_remaining_pct"),
                             st.get("weekly_remaining_pct")
                         )
+                    try:
+                        live_conv = await get_active_conversation_id(page)
+                        if live_conv and mem.get("last_active_conversation_id") != live_conv:
+                            from token_memory import save_memory
+                            mem["last_active_conversation_id"] = live_conv
+                            save_memory(mem)
+                    except Exception:
+                        pass
                     
                 is_exhausted = log_exhausted or chat_exhausted
                 reason = chat_reason if chat_exhausted else (log_reason if log_exhausted else "")
@@ -459,11 +473,17 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                         logger.info(f"Autorizando alternancia: {switch_reason} (Destino: {best_target})")
                                         
                                         conv_id = await get_active_conversation_id(page)
+                                        if not conv_id:
+                                            try:
+                                                from token_memory import load_memory
+                                                conv_id = load_memory().get("last_active_conversation_id")
+                                            except Exception:
+                                                pass
                                         logger.info(f"Guardando ID de conversacion activa: {conv_id}")
                                         
                                         with RotationLock(owner="daemon_auto_rotation"):
                                             try:
-                                                success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True)
+                                                success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True, conv_id=conv_id)
                                                 last_switch_time = time.time()
                                                 if success:
                                                     circuit_breaker.record_success()

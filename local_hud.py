@@ -501,8 +501,14 @@ def get_hud_status_payload() -> Dict[str, Any]:
     mem = load_memory()
     active = mem.get("active_account", "")
     
+    try:
+        from config_manager import get_authorized_emails
+        auth_emails = get_authorized_emails()
+    except Exception:
+        auth_emails = DEFAULT_ACCOUNTS
+        
     effective_accounts = {}
-    for email in DEFAULT_ACCOUNTS:
+    for email in auth_emails:
         effective_accounts[email] = get_effective_account_status(email)
         
     burn = calculate_burn_rate(active) if active else {}

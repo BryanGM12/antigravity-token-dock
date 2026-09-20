@@ -101,6 +101,7 @@ def _default_memory_factory() -> Dict[str, Any]:
         "auto_switch_enabled": True,
         "pinned_account": None,
         "sound_enabled": True,
+        "last_active_conversation_id": None,
         "accounts": {}
     }
 
@@ -117,6 +118,8 @@ def load_memory() -> Dict[str, Any]:
         data["pinned_account"] = None
     if "sound_enabled" not in data:
         data["sound_enabled"] = True
+    if "last_active_conversation_id" not in data:
+        data["last_active_conversation_id"] = None
         
     # Dynamically resolve authorized accounts
     try:

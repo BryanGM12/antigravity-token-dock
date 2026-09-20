@@ -306,23 +306,36 @@ async def is_authenticated_in_dom(page: Page) -> bool:
     except Exception:
         return False
 
-async def rotate_account(page: Page, context: Optional[BrowserContext] = None, target_email: Optional[str] = None, auto_prompt: bool = False) -> Tuple[bool, str, str]:
+async def rotate_account(page: Page, context: Optional[BrowserContext] = None, target_email: Optional[str] = None, auto_prompt: bool = False, conv_id: Optional[str] = None) -> Tuple[bool, str, str]:
     """
     Full rotation pipeline:
     1. Detects current active email and captures active conversation ID.
     2. Validates it is in AUTHORIZED_ACCOUNTS.
     3. Determines next target email (or uses explicitly specified target_email).
-    4. Clicks Sign Out.
-    5. Clicks Sign In / Continue with Google.
-    6. Completes Google OAuth in Comet with calibrated row selection and closes Comet tab.
-    7. Verifies new logged in email in Antigravity.
-    8. Updates token memory with new account quota.
-    9. Restores active conversation without intrusive prompts unless auto_prompt=True.
+    4. Triggers seamless in-place re-authentication (RE_SIGN_IN) without dropping tokens for subagents.
+    5. Completes Google OAuth in default browser with calibrated row selection and closes auth tab.
+    6. Verifies new logged in email in Antigravity.
+    7. Updates token memory with new account quota.
+    8. Restores active conversation without intrusive prompts unless auto_prompt=True.
     """
     logger.info("Starting automated account rotation...")
     
-    # 1. Capture active conversation for resumption later
-    active_conv_id = await get_active_conversation_id(page)
+    # 1. Capture active conversation for resumption later (with persistent disk backup)
+    active_conv_id = conv_id or await get_active_conversation_id(page)
+    if not active_conv_id:
+        try:
+            from token_memory import load_memory
+            active_conv_id = load_memory().get("last_active_conversation_id")
+        except Exception:
+            pass
+    if active_conv_id:
+        try:
+            from token_memory import load_memory, save_memory
+            mem = load_memory()
+            mem["last_active_conversation_id"] = active_conv_id
+            save_memory(mem)
+        except Exception:
+            pass
     logger.info(f"Active conversation ID: {active_conv_id}")
     
     # 2. Detect current email
@@ -349,41 +362,45 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         logger.info(f"Determined target account: {chosen_target}")
     target_email = chosen_target
     
-    # 3. Sign Out (skipped if already in onboarding or signed-out state)
-    is_already_onboarding = "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button, button:has-text("Continue with Google")').count() > 0)
-    if is_already_onboarding:
-        logger.info("Antigravity is already in signed-out state (/onboarding visible). Proceeding directly to sign in.")
-    else:
-        if not await sign_out(page):
-            # Check if sign_out resulted in reaching /onboarding anyway
-            if "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button').count() > 0):
-                logger.info("Sign out transition led to onboarding state. Proceeding.")
-            else:
-                raise RuntimeError("Failed to execute Sign Out in Antigravity.")
-        
-    await asyncio.sleep(0.05)
-    
-    # 4. Trigger Sign In flow with Pre-Click HWND Snapshot
+    # 3. Trigger Sign In flow with Pre-Click HWND Snapshot
     from external_oauth_handler import capture_browser_hwnds, get_default_browser_info
     target_proc, _ = get_default_browser_info()
     pre_hwnds = capture_browser_hwnds(target_proc)
     logger.info(f"Captured {len(pre_hwnds)} pre-existing {target_proc} window(s) before sign-in trigger.")
 
-    if not await wait_for_and_click_sign_in(page, timeout_sec=15):
-        await close_settings(page)
-        await asyncio.sleep(0.5)
-        if not await wait_for_and_click_sign_in(page, timeout_sec=10):
-            raise RuntimeError("Could not trigger Google Sign In button.")
+    is_already_onboarding = "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button, button:has-text("Continue with Google")').count() > 0)
+    login_triggered = False
+
+    if not is_already_onboarding:
+        # Seamless In-Place Re-Authentication (RE_SIGN_IN):
+        # Keeps active session token alive until OAuth completes, preventing
+        # "You are not logged into Antigravity" crashes in background subagents.
+        logger.info("Attempting seamless in-place re-authentication (RE_SIGN_IN)...")
+        login_triggered = await wait_for_and_click_sign_in(page, timeout_sec=4)
+
+    if not login_triggered:
+        if not is_already_onboarding:
+            logger.info("Falling back to full sign-out sequence...")
+            if not await sign_out(page):
+                if "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button').count() > 0):
+                    logger.info("Sign out transition led to onboarding state. Proceeding.")
+                else:
+                    raise RuntimeError("Failed to execute Sign Out in Antigravity.")
+
+        if not await wait_for_and_click_sign_in(page, timeout_sec=15):
+            await close_settings(page)
+            await asyncio.sleep(0.5)
+            if not await wait_for_and_click_sign_in(page, timeout_sec=10):
+                raise RuntimeError("Could not trigger Google Sign In button.")
             
-    # 5. Handle external Google OAuth in default browser with isolation and real-time sync
+    # 4. Handle external Google OAuth in default browser with isolation and real-time sync
     logger.info(f"Handling external Google OAuth in {target_proc} for {target_email}...")
     import threading
     auth_event = threading.Event()
 
     async def poll_auth_success():
-        for _ in range(600):  # poll every 30ms up to 18s
-            if auth_event.is_set():
-                break
+        poll_start = time.time()
+        while not auth_event.is_set() and (time.time() - poll_start) < 300.0:
             try:
                 if await is_authenticated_in_dom(page):
                     auth_event.set()
@@ -391,7 +408,7 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
                     break
             except Exception:
                 pass
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.04)
 
     poll_task = asyncio.create_task(poll_auth_success())
 
