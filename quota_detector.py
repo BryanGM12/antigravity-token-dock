@@ -75,7 +75,7 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
             
         # Parse Email
         detected_email = None
-        user_st = data.get("userStatus", {}).get("userStatus", {})
+        user_st = (data.get("userStatus") or {}).get("userStatus") or {}
         if user_st.get("email"):
             detected_email = user_st["email"].strip().lower()
             
@@ -87,8 +87,9 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
             except Exception:
                 pass
                 
-        # Parse Groups from Quota Summary
-        groups = data.get("quotaSummary", {}).get("response", {}).get("groups", [])
+        # Parse Groups from Quota Summary safely
+        quota_resp = (data.get("quotaSummary") or {}).get("response") or {}
+        groups = quota_resp.get("groups") or []
         
         gemini_group = next((g for g in groups if "Gemini" in g.get("displayName", "")), None)
         claude_group = next((g for g in groups if "Claude" in g.get("displayName", "") or "GPT" in g.get("displayName", "")), None)
@@ -132,16 +133,17 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
         gemini_data = parse_bucket_group(gemini_group)
         claude_data = parse_bucket_group(claude_group)
         
-        # Parse Models Quotas
+        # Parse Models Quotas safely
         models_data = {}
-        for m_cfg in user_st.get("cascadeModelConfigData", {}).get("clientModelConfigs", []):
+        model_configs = ((user_st.get("cascadeModelConfigData") or {}).get("clientModelConfigs")) or []
+        for m_cfg in model_configs:
             m_id = m_cfg.get("modelId", "")
-            q_info = m_cfg.get("quotaInfo", {})
+            q_info = m_cfg.get("quotaInfo") or {}
             if m_id and q_info:
                 models_data[m_id] = {
                     "label": m_cfg.get("label", m_id),
                     "remaining_fraction": q_info.get("remainingFraction"),
-                    "reset_time": q_info.get("resetTime", {}).get("seconds"),
+                    "reset_time": (q_info.get("resetTime") or {}).get("seconds"),
                     "disabled": m_cfg.get("disabled", False)
                 }
                 
@@ -194,7 +196,7 @@ async def get_ui_quota_limits(page: Page, known_email: Optional[str] = None) -> 
     """Fallback UI scraper: Navigates to Models settings and extracts real-time quota percentages."""
     is_opened = False
     dialog = page.locator('div[role="dialog"]')
-    if await dialog.count() == 0 or not await dialog.is_visible():
+    if await dialog.count() == 0 or not await dialog.first.is_visible():
         is_opened = True
         
     nav_success = await navigate_settings_tab(page, "Models")
@@ -203,7 +205,7 @@ async def get_ui_quota_limits(page: Page, known_email: Optional[str] = None) -> 
         
     await asyncio.sleep(0.4)
     
-    dialog_text = await page.locator('div[role="dialog"]').inner_text()
+    dialog_text = await page.locator('div[role="dialog"]').first.inner_text()
     lines = [line.strip() for line in dialog_text.split('\n') if line.strip()]
     
     limits = {
@@ -269,7 +271,7 @@ async def get_ui_quota_limits(page: Page, known_email: Optional[str] = None) -> 
 async def get_quota_limits(page: Page, known_email: Optional[str] = None) -> Dict[str, Any]:
     """Gets quota limits preferring direct background query first, falling back to UI scraper."""
     direct = await get_direct_quota_limits(page, known_email)
-    if direct and direct.get("weekly_remaining_pct") is not None:
+    if direct and (direct.get("weekly_remaining_pct") is not None or direct.get("five_hour_remaining_pct") is not None):
         return direct
     return await get_ui_quota_limits(page, known_email)
 
@@ -306,8 +308,7 @@ def check_log_quota_errors(lookback_seconds: int = 60) -> Tuple[bool, str]:
                                 return True, f"{desc} (hace {int(diff)}s)"
                         except Exception:
                             pass
-                    else:
-                        return True, desc
+                    # Notice: if no timestamp matches within lookback_seconds, do not falsely flag stale errors
                         
         return False, "No recent errors in log"
     except Exception as e:
@@ -326,9 +327,13 @@ async def check_chat_quota_errors(page: Page) -> Tuple[bool, str]:
                 'model capacity exhausted'
             ];
             
-            const cards = document.querySelectorAll('[role="alert"], .text-destructive, .bg-destructive, div');
+            // Only inspect actual error/alert banners, strictly excluding conversation messages and code blocks
+            const cards = document.querySelectorAll('[role="alert"], .text-destructive, .bg-destructive, [data-testid*="error-banner"], [data-testid*="alert"]');
             for (const el of cards) {
-                const txt = (el.innerText || '').toLowerCase();
+                if (el.closest('.user-message, .assistant-message, pre, code, p')) {
+                    continue;
+                }
+                const txt = (el.textContent || '').toLowerCase();
                 for (const kw of errorKeywords) {
                     if (txt.includes(kw)) {
                         return { found: true, message: kw };

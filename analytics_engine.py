@@ -7,6 +7,8 @@ estimates time to depletion (ETD), and records historical rotation cycles.
 import os
 import json
 import logging
+import hashlib
+import copy
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -18,6 +20,20 @@ os.makedirs(STATE_DIR, exist_ok=True)
 
 MAX_HISTORY_SAMPLES = 200
 
+_cached_analytics: Optional[Dict[str, Any]] = None
+_cached_analytics_mtime: float = 0.0
+_last_analytics_hash: Optional[str] = None
+
+def _compute_analytics_hash(data: Dict[str, Any]) -> str:
+    """Computes a lightweight hash of actual analytics payload."""
+    payload = {
+        "total_rotations": data.get("total_rotations", 0),
+        "samples_count": len(data.get("samples", [])),
+        "last_sample": data.get("samples", [])[-1] if data.get("samples") else None
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.md5(raw).hexdigest()
+
 def _default_analytics_factory() -> Dict[str, Any]:
     return {
         "updated_at": None,
@@ -25,16 +41,41 @@ def _default_analytics_factory() -> Dict[str, Any]:
         "samples": []
     }
 
-def load_analytics_data() -> Dict[str, Any]:
-    """Loads analytics history and cycle stats from disk with retry tolerance and corrupt recovery."""
-    from atomic_state import SafeJsonStore
-    return SafeJsonStore.load_json(ANALYTICS_FILE, _default_analytics_factory)
+def load_analytics_data(force_reload: bool = False) -> Dict[str, Any]:
+    """Loads analytics history and cycle stats from disk with mtime caching and corrupt recovery."""
+    global _cached_analytics, _cached_analytics_mtime, _last_analytics_hash
 
-def save_analytics_data(data: Dict[str, Any]):
-    """Saves analytics data atomically to disk with unique temp file and Windows retry."""
+    if not force_reload and _cached_analytics is not None and os.path.exists(ANALYTICS_FILE):
+        try:
+            mtime = os.path.getmtime(ANALYTICS_FILE)
+            if mtime == _cached_analytics_mtime:
+                return copy.deepcopy(_cached_analytics)
+        except Exception:
+            pass
+
     from atomic_state import SafeJsonStore
+    data = SafeJsonStore.load_json(ANALYTICS_FILE, _default_analytics_factory)
+    _cached_analytics = copy.deepcopy(data)
+    _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
+    _last_analytics_hash = _compute_analytics_hash(data)
+    return data
+
+def save_analytics_data(data: Dict[str, Any], force: bool = False) -> bool:
+    """Saves analytics data atomically to disk with dirty-checking hash and Windows retry."""
+    global _cached_analytics, _cached_analytics_mtime, _last_analytics_hash
+    from atomic_state import SafeJsonStore
+
+    current_hash = _compute_analytics_hash(data)
+    if not force and _last_analytics_hash == current_hash and os.path.exists(ANALYTICS_FILE):
+        _cached_analytics = copy.deepcopy(data)
+        return False
+
     data["updated_at"] = datetime.now().isoformat()
     SafeJsonStore.save_json(ANALYTICS_FILE, data)
+    _cached_analytics = copy.deepcopy(data)
+    _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
+    _last_analytics_hash = current_hash
+    return True
 
 def record_usage_sample(account: str, five_hour_pct: Optional[int], weekly_pct: Optional[int]) -> Dict[str, Any]:
     """Records a new timestamped quota sample for burn-rate calculations."""
@@ -42,7 +83,8 @@ def record_usage_sample(account: str, five_hour_pct: Optional[int], weekly_pct: 
         return {}
         
     data = load_analytics_data()
-    now = datetime.now().isoformat()
+    now_dt = datetime.now()
+    now = now_dt.isoformat()
     
     sample = {
         "timestamp": now,
@@ -51,13 +93,19 @@ def record_usage_sample(account: str, five_hour_pct: Optional[int], weekly_pct: 
         "weekly_pct": weekly_pct
     }
     
-    # Avoid recording duplicate consecutive samples within 30 seconds if values are identical
+    # Avoid recording duplicate consecutive samples and unnecessary disk writes if values are identical
     if data["samples"]:
         last = data["samples"][-1]
         if (last["account"] == sample["account"] and 
             last["five_hour_pct"] == sample["five_hour_pct"] and 
             last["weekly_pct"] == sample["weekly_pct"]):
-            # Just update timestamp of last sample
+            try:
+                last_dt = datetime.fromisoformat(last["timestamp"])
+                # Throttle disk update on identical readings to at most once per 180 seconds
+                if (now_dt - last_dt).total_seconds() < 180:
+                    return sample
+            except Exception:
+                pass
             last["timestamp"] = now
             save_analytics_data(data)
             return sample

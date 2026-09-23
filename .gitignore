@@ -36,12 +36,17 @@ env.bak/
 venv.bak/
 
 # Project private credentials and runtime state
-accounts_config.json
-token_memory.json
+accounts_config.json*
+token_memory.json*
+analytics_history.json*
 *.log
+*.log.*
+*.log*
 *.pid
 *.db
 *.tmp
+*.bak
+*.lock
 *.png
 *.jpg
 *.jpeg
@@ -49,6 +54,7 @@ token_memory.json
 !docs/assets/**
 account_dialog.html
 tmp_hist.db
+state/
 
 # Operating System Files
 Thumbs.db

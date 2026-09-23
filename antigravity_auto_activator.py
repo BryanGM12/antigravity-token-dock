@@ -22,6 +22,7 @@ import subprocess
 import logging
 import psutil
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from typing import Optional, List
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -37,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -51,19 +52,55 @@ def get_pythonw_executable() -> str:
         return str(pythonw)
     return sys.executable
 
+_cached_ag_pid: Optional[int] = None
+
 def is_antigravity_running() -> bool:
-    """Checks if any Antigravity IDE process is running."""
-    for p in psutil.process_iter(['name']):
+    """Checks if any Antigravity IDE process is running using fast PID caching."""
+    global _cached_ag_pid
+    if _cached_ag_pid is not None:
+        try:
+            if psutil.pid_exists(_cached_ag_pid):
+                p = psutil.Process(_cached_ag_pid)
+                name = (p.name() or '').lower()
+                if ('antigravity.exe' in name or name == 'antigravity') and p.is_running():
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        _cached_ag_pid = None
+
+    for p in psutil.process_iter(['pid', 'name']):
         try:
             name = (p.info.get('name') or '').lower()
             if 'antigravity.exe' in name or name == 'antigravity':
+                _cached_ag_pid = p.info.get('pid')
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return False
 
 def get_process_by_script(script_name: str) -> Optional[psutil.Process]:
-    """Finds a running python process executing the specified script."""
+    """Finds a running python process executing the specified script, prioritizing PID file."""
+    # 1. Fast path: check PID file
+    pid_file_map = {
+        "daemon_service.py": DAEMON_PID_FILE,
+        "antigravity_docked_overlay.py": WIDGET_PID_FILE,
+        "antigravity_auto_activator.py": ACTIVATOR_PID_FILE
+    }
+    pid_file = pid_file_map.get(script_name)
+    if pid_file and pid_file.exists():
+        try:
+            with open(pid_file, "r", encoding="ascii") as f:
+                saved_pid = int(f.read().strip())
+            if psutil.pid_exists(saved_pid):
+                proc = psutil.Process(saved_pid)
+                if 'python' in (proc.name() or '').lower():
+                    cmdline = proc.cmdline() or []
+                    if script_name.lower() in " ".join(cmdline).lower():
+                        return proc
+        except Exception:
+            pass
+
+    # 2. Fallback: single scan across running processes
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             name = (proc.info.get('name') or '').lower()
@@ -71,6 +108,12 @@ def get_process_by_script(script_name: str) -> Optional[psutil.Process]:
                 cmdline = proc.info.get('cmdline') or []
                 cmd_str = " ".join(cmdline).lower()
                 if script_name.lower() in cmd_str:
+                    if pid_file:
+                        try:
+                            with open(pid_file, "w", encoding="ascii") as f:
+                                f.write(str(proc.pid))
+                        except Exception:
+                            pass
                     return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -187,7 +230,7 @@ def check_single_instance() -> bool:
         f.write(str(os.getpid()))
     return True
 
-def run_activator_loop(poll_interval: float = 2.0, grace_period_sec: float = 6.0):
+def run_activator_loop(poll_interval: float = 3.0, grace_period_sec: float = 6.0):
     """
     Main supervisory loop.
     Detects when Antigravity is active and activates daemon & widget.

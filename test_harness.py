@@ -7,6 +7,7 @@ import sys
 import asyncio
 import urllib.request
 import json
+import time
 from playwright.async_api import async_playwright
 
 from antigravity_bridge import (
@@ -26,7 +27,7 @@ from external_oauth_handler import (
     find_interactive_button,
     find_account_row_interactive
 )
-from token_memory import load_memory, get_effective_account_status, evaluate_switch_readiness
+from token_memory import load_memory, save_memory, get_effective_account_status, evaluate_switch_readiness
 from analytics_engine import calculate_burn_rate, record_usage_sample, load_analytics_data
 from watchdog_service import run_health_audit, ensure_dark_theme
 from goal_resumer import analyze_chat_state
@@ -35,7 +36,7 @@ from circuit_breaker import RotationCircuitBreaker
 from atomic_state import SafeJsonStore
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (30 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (32 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -142,11 +143,21 @@ async def run_all_tests():
     # 19. Local HUD REST Micro-API Query
     hud_url = "http://127.0.0.1:59123/api/status"
     req = urllib.request.Request(hud_url, headers={"User-Agent": "AntigravityHarness"})
-    with urllib.request.urlopen(req, timeout=3.0) as resp:
-        hud_payload = json.loads(resp.read().decode())
-        print(f"[PASS] 19. Local HUD API en vivo (59123): Activa={hud_payload.get('active_account')}, Cuentas={len(hud_payload.get('accounts', {}))}")
-        assert hud_payload.get("active_account") is not None, "El HUD debe reportar la cuenta activa"
-        assert len(hud_payload.get("accounts", {})) == 4, "El HUD debe monitorear las 4 cuentas"
+    hud_payload = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                hud_payload = json.loads(resp.read().decode())
+                break
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5)
+    if hud_payload is None:
+        raise AssertionError(f"Fallo al consultar HUD API tras 3 intentos: {last_err}")
+    print(f"[PASS] 19. Local HUD API en vivo (59123): Activa={hud_payload.get('active_account')}, Cuentas={len(hud_payload.get('accounts', {}))}")
+    assert hud_payload.get("active_account") is not None, "El HUD debe reportar la cuenta activa"
+    assert len(hud_payload.get("accounts", {})) == 4, "El HUD debe monitorear las 4 cuentas"
         
     # 20. Circuit Breaker Engine Verification
     cb = RotationCircuitBreaker(failure_threshold=3, base_cooldown_sec=10.0, max_cooldown_sec=60.0)
@@ -357,7 +368,54 @@ async def run_all_tests():
     assert detect_blue_button_center(0) is None
     print("[PASS] 30. Motor Turbo Speed verificado: Shared OCR Caching, CV Fast-Path & Detección React Sub-50ms.")
 
-    print("\n--- TODOS LOS 30 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 31. Re-Autenticación In-Place y Seguimiento de Conversación Persistente
+    from account_rotator import wait_for_and_click_sign_in
+    assert callable(wait_for_and_click_sign_in), "wait_for_and_click_sign_in debe ser una corrutina invocable"
+    mem = load_memory()
+    original_conv_id = mem.get("last_active_conversation_id")
+    test_conv_id = "test-conv-e2e-persistence"
+    mem["last_active_conversation_id"] = test_conv_id
+    save_memory(mem)
+    mem_reloaded = load_memory()
+    assert mem_reloaded.get("last_active_conversation_id") == test_conv_id, "last_active_conversation_id debe persistir en disco"
+    # Restore original state
+    mem_reloaded["last_active_conversation_id"] = original_conv_id
+    save_memory(mem_reloaded)
+    print("[PASS] 31. Re-Autenticación In-Place y Seguimiento de Conversación persistente verificados.")
+
+    # 32. Rotación Automática de Logs (AutoFlushRotatingFileHandler) y Retención
+    import tempfile
+    import logging
+    import shutil
+    from daemon_service import AutoFlushRotatingFileHandler
+    test_log_dir = tempfile.mkdtemp(prefix="test_log_rot_")
+    test_log_file = os.path.join(test_log_dir, "test_controller.log")
+    test_logger = logging.getLogger("TestLogRotator")
+    test_logger.setLevel(logging.INFO)
+    test_logger.propagate = False
+    rot_handler = AutoFlushRotatingFileHandler(test_log_file, maxBytes=300, backupCount=2, encoding="utf-8")
+    test_logger.addHandler(rot_handler)
+    try:
+        # Write enough lines to exceed 300 bytes and trigger rotation
+        for i in range(15):
+            test_logger.info(f"Log entry line number {i}: testing auto-flush log rotation engine in Windows.")
+        rot_handler.close()
+        test_logger.removeHandler(rot_handler)
+        
+        # Verify base log exists and rotated file (.1) exists
+        assert os.path.exists(test_log_file), "Archivo de log base debe existir"
+        rotated_log = test_log_file + ".1"
+        assert os.path.exists(rotated_log), "Archivo rotado .1 debe existir tras exceder maxBytes"
+        assert os.path.getsize(rotated_log) > 0, "Archivo rotado debe contener registros anteriores"
+        print("[PASS] 32. Rotación Automática de Logs (AutoFlushRotatingFileHandler) y Retención verificadas.")
+    finally:
+        rot_handler.close()
+        try:
+            shutil.rmtree(test_log_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    print("\n--- TODOS LOS 32 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

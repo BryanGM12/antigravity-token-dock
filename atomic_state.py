@@ -31,11 +31,14 @@ class SafeJsonStore:
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    if isinstance(data, dict) and data:
+                    if isinstance(data, dict):
                         return data
                 except (PermissionError, OSError):
                     time.sleep(0.02 * (attempt + 1))
                 except json.JSONDecodeError:
+                    if attempt < 2:
+                        time.sleep(0.03 * (attempt + 1))
+                        continue
                     logger.warning(f"[CORRUPCIÓN DETECTADA] {filepath} corrupto o truncado. Intentando respaldo .bak...")
                     break
                     

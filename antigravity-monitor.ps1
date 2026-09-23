@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position=0)]
-    [ValidateSet("start", "stop", "status", "restart", "activator", "widget", "hud", "analytics", "health", "notify-test", "add", "list", "remove")]
+    [ValidateSet("start", "stop", "status", "restart", "switch", "activator", "widget", "hud", "analytics", "health", "notify-test", "add", "list", "remove")]
     [string]$Action = "status"
 )
 
@@ -215,10 +215,23 @@ switch ($Action.ToLower()) {
             Write-Host " Widget Acoplado: [✕ INACTIVO]" -ForegroundColor Gray
         }
 
-        Write-Host " Log Principal:   $LogFile" -ForegroundColor DarkGray
+        if (Test-Path $LogFile) {
+            $logSize = (Get-Item $LogFile).Length / 1MB
+            Write-Host (" Log Principal:   {0} ({1:N2} MB)" -f $LogFile, $logSize) -ForegroundColor DarkGray
+        } else {
+            Write-Host " Log Principal:   $LogFile (no existe)" -ForegroundColor DarkGray
+        }
         Write-Host " HUD Web:         http://127.0.0.1:59123" -ForegroundColor Cyan
         Write-Host "-----------------------------------------------------"
         & python.exe "$ScriptDir\daemon_service.py" --status
+    }
+
+    "switch" {
+        Write-Host "=====================================================" -ForegroundColor Cyan
+        Write-Host "     ROTADOR DE CUENTAS DE ANTIGRAVITY (INSTANT)     " -ForegroundColor Cyan
+        Write-Host "=====================================================" -ForegroundColor Cyan
+        & python.exe "$ScriptDir\daemon_service.py" --switch-now
+        Write-Host "`nOperacion finalizada." -ForegroundColor Green
     }
 
     "restart" {

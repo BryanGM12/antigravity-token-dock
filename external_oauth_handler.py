@@ -444,7 +444,7 @@ def get_browser_url(hwnd: int) -> str:
         activate_browser_window(hwnd)
         pyperclip.copy("")
         send_key_combination(hwnd, 0x11, ord('L'))
-        time.sleep(0.03)
+        time.sleep(0.06)
         send_key_combination(hwnd, 0x11, ord('C'))
 
         url = ""
@@ -469,15 +469,28 @@ def get_browser_url(hwnd: int) -> str:
                 pass
 
 def inject_url_in_browser(hwnd: int, new_url: str):
-    """Navigates browser directly to new_url via address bar."""
-    activate_browser_window(hwnd)
-    pyperclip.copy(new_url)
-    send_key_combination(hwnd, 0x11, ord('L'))
-    time.sleep(0.03)
-    send_key_combination(hwnd, 0x11, ord('V'))
-    time.sleep(0.03)
-    send_single_key(hwnd, 0x0D)  # VK_RETURN
-    time.sleep(0.12)
+    """Navigates browser directly to new_url via address bar with clipboard protection."""
+    old_clip = None
+    try:
+        old_clip = pyperclip.paste()
+    except Exception:
+        pass
+
+    try:
+        activate_browser_window(hwnd)
+        pyperclip.copy(new_url)
+        send_key_combination(hwnd, 0x11, ord('L'))
+        time.sleep(0.04)
+        send_key_combination(hwnd, 0x11, ord('V'))
+        time.sleep(0.04)
+        send_single_key(hwnd, 0x0D)  # VK_RETURN
+        time.sleep(0.12)
+    finally:
+        if old_clip is not None:
+            try:
+                pyperclip.copy(old_clip)
+            except Exception:
+                pass
 
 def physical_click(x: int, y: int, fast: bool = True):
     """Moves physical cursor and fires mouse down/up on the interactive desktop."""
@@ -651,6 +664,7 @@ def run_native_ocr(hwnd: int) -> List[Dict[str, Any]]:
         res = subprocess.run(
             [
                 "powershell.exe",
+                "-NoLogo",
                 "-WindowStyle", "Hidden",
                 "-NoProfile",
                 "-NonInteractive",
@@ -889,11 +903,11 @@ def find_account_row_interactive(
     for scroll_attempt in range(2 if allow_scroll else 1):
         items = ocr_items if (ocr_items is not None and scroll_attempt == 0) else run_native_ocr(hwnd)
         if items:
-            # Pass 1: Strict email / username match (100% distinct per account, zero ambiguity)
+            # Pass 1: Strict email / exact username match (100% distinct per account, zero ambiguity)
             for item in items:
                 txt = (item.get("text") or "").strip().lower()
                 clean_txt = re.sub(r'[^a-z0-9]', '', txt)
-                if clean_user in clean_txt or user_part in txt or norm_email in txt:
+                if norm_email in txt or clean_txt == clean_user or (re.search(rf'\b{re.escape(user_part)}\b', txt) is not None):
                     logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por coincidencia exacta de correo/usuario ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
                     return item["screen_cx"], item["screen_cy"], f"ocr_exact_email:{item['text']}"
 
@@ -1420,6 +1434,7 @@ def handle_external_google_signin(
     account_selected = False
     challenge_notified = False
     last_prompt_number: Optional[str] = None
+    current_screen_type: str = "UNKNOWN"
 
     while time.time() < effective_deadline and (time.time() - start_time) < max_safety_limit:
         # 0. Real-time background sync with Antigravity workbench
@@ -1451,12 +1466,15 @@ def handle_external_google_signin(
         title = buff.value
 
         # Check URL when needed (fast-path immediate check on iteration 0)
+        # Suppress Ctrl+L address bar check if user is on an active interactive challenge screen!
         now = time.time()
         should_check_url = False
-        if not url_injected and (last_url_check == 0.0 or (now - last_url_check > 0.4)):
-            should_check_url = True
-        elif (now - last_url_check > 1.5) and not any(w in title.lower() for w in ["auth success", "google antigravity auth success"]):
-            should_check_url = True
+        is_challenge_active = current_screen_type.startswith("CHALLENGE") or current_screen_type == "SIGNIN_FORM"
+        if not is_challenge_active:
+            if not url_injected and (last_url_check == 0.0 or (now - last_url_check > 0.4)):
+                should_check_url = True
+            elif (now - last_url_check > 1.8) and not any(w in title.lower() for w in ["auth success", "google antigravity auth success"]):
+                should_check_url = True
 
         if should_check_url:
             last_url_check = now
@@ -1494,6 +1512,7 @@ def handle_external_google_signin(
         if screen_type == "UNKNOWN":
             ocr_items = run_native_ocr(hwnd)
             screen_type = classify_oauth_screen(hwnd, title=title, cached_url=cached_url, ocr_items=ocr_items)
+        current_screen_type = screen_type
 
         # 1. Handle Google Verification Challenges (Phone prompt, SMS, Authenticator, Password, etc.)
         if screen_type.startswith("CHALLENGE") or screen_type == "SIGNIN_FORM":

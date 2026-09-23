@@ -11,6 +11,7 @@ import asyncio
 import logging
 import argparse
 import json
+import traceback
 from typing import Optional
 import psutil
 from playwright.async_api import async_playwright
@@ -19,10 +20,22 @@ LOG_DIR = os.path.expandvars(r"%USERPROFILE%\.openclaw\workspace\state\antigravi
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "controller.log")
 
-class AutoFlushFileHandler(logging.FileHandler):
+from logging.handlers import RotatingFileHandler
+
+class AutoFlushRotatingFileHandler(RotatingFileHandler):
+    """Auto-flushing rotating file handler with Windows-safe rollover protection."""
     def emit(self, record):
         super().emit(record)
         self.flush()
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except (PermissionError, OSError):
+            # On Windows, if another reader has the file locked, fail gracefully
+            pass
+
+AutoFlushFileHandler = AutoFlushRotatingFileHandler
 
 # Configure root logger explicitly before importing submodules
 root_logger = logging.getLogger()
@@ -31,7 +44,7 @@ for h in list(root_logger.handlers):
     root_logger.removeHandler(h)
 
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-file_handler = AutoFlushFileHandler(LOG_FILE, encoding="utf-8")
+file_handler = AutoFlushRotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
 file_handler.setFormatter(formatter)
 root_logger.addHandler(file_handler)
 
@@ -133,8 +146,8 @@ class RotationLock:
                     "pid": os.getpid(),
                     "time": time.time()
                 }
-                with open(LOCK_FILE, "w", encoding="utf-8") as f:
-                    json.dump(payload, f)
+                from atomic_state import SafeJsonStore
+                SafeJsonStore.save_json(LOCK_FILE, payload)
                 self.acquired = True
                 return True
             except Exception:
@@ -144,8 +157,8 @@ class RotationLock:
     def release(self):
         if os.path.exists(LOCK_FILE):
             try:
-                with open(LOCK_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                from atomic_state import SafeJsonStore
+                data = SafeJsonStore.load_json(LOCK_FILE, dict)
                 if data.get("pid") == os.getpid():
                     os.remove(LOCK_FILE)
             except Exception:
@@ -153,7 +166,8 @@ class RotationLock:
         self.acquired = False
 
     def __enter__(self):
-        self.acquire()
+        if not self.acquire(timeout_sec=15):
+            raise TimeoutError(f"No se pudo adquirir el bloqueo de rotación ({self.owner}) dentro del tiempo de espera.")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -164,8 +178,10 @@ def is_rotation_locked() -> bool:
     if not os.path.exists(LOCK_FILE):
         return False
     try:
-        with open(LOCK_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        from atomic_state import SafeJsonStore
+        data = SafeJsonStore.load_json(LOCK_FILE, dict)
+        if not data:
+            return False
         lock_pid = data.get("pid")
         lock_time = data.get("time", 0)
         if time.time() - lock_time > 90:
@@ -226,7 +242,6 @@ async def run_single_switch(target_email: Optional[str] = None):
             conv_id = await get_active_conversation_id(page)
             if not conv_id:
                 try:
-                    from token_memory import load_memory
                     conv_id = load_memory().get("last_active_conversation_id")
                 except Exception:
                     pass
@@ -254,12 +269,26 @@ async def run_single_switch(target_email: Optional[str] = None):
     finally:
         lock.release()
 
+_cached_daemon_ag_pid: Optional[int] = None
+
 def is_antigravity_running() -> bool:
-    """Checks if any Antigravity process is actively running."""
-    for proc in psutil.process_iter(['name']):
+    """Checks if any Antigravity process is actively running with fast PID caching."""
+    global _cached_daemon_ag_pid
+    if _cached_daemon_ag_pid is not None:
+        try:
+            if psutil.pid_exists(_cached_daemon_ag_pid):
+                proc = psutil.Process(_cached_daemon_ag_pid)
+                if 'antigravity' in (proc.name() or '').lower() and proc.is_running():
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        _cached_daemon_ag_pid = None
+
+    for proc in psutil.process_iter(['pid', 'name']):
         try:
             name = proc.info.get('name') or ''
             if 'antigravity.exe' in name.lower():
+                _cached_daemon_ag_pid = proc.info.get('pid')
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -290,63 +319,83 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
         backoff_multiplier=2.0,
         jitter_factor=0.2
     )
+
+    pw_instance = None
+    browser = None
+    page = None
+
+    async def get_or_reconnect_page():
+        nonlocal pw_instance, browser, page
+        if pw_instance is None:
+            pw_instance = await async_playwright().start()
+        if browser is None or not browser.is_connected():
+            browser, page = await connect_antigravity(pw_instance)
+        elif page is None or page.is_closed():
+            try:
+                from antigravity_bridge import ensure_active_page
+                page = await ensure_active_page(browser, page)
+            except Exception:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                browser, page = await connect_antigravity(pw_instance)
+        return browser, page
     
     # Take initial sample on startup
     if is_antigravity_running():
         try:
-            async with async_playwright() as p:
-                browser, page = await connect_antigravity(p)
-                logger.info("Capturando muestra inicial de cuota y cuenta...")
-                await ensure_dark_theme(page)
-                await get_quota_limits(page)
-                last_ui_sample_time = time.time()
-                
-                # Record sample in analytics
-                mem = load_memory()
-                active_acc = mem.get("active_account")
-                if active_acc:
-                    st = get_effective_account_status(active_acc)
-                    record_usage_sample(
-                        active_acc,
-                        st.get("five_hour_remaining_pct"),
-                        st.get("weekly_remaining_pct")
-                    )
-                await browser.close()
-                logger.info("Muestra inicial registrada en memoria y analiticas exitosamente.")
-        except Exception as e:
-            logger.warning(f"No se pudo capturar muestra inicial: {e}")
+            browser, page = await get_or_reconnect_page()
+            logger.info("Capturando muestra inicial de cuota y cuenta...")
+            await ensure_dark_theme(page)
+            await get_quota_limits(page)
+            last_ui_sample_time = time.time()
             
-    while True:
-        # Check if Antigravity is still running
-        if not is_antigravity_running():
-            logger.info("Antigravity no detectado en ejecucion. Esperando 5s de gracia...")
-            await asyncio.sleep(5.0)
+            # Record sample in analytics
+            mem = load_memory()
+            active_acc = mem.get("active_account")
+            if active_acc:
+                st = get_effective_account_status(active_acc)
+                record_usage_sample(
+                    active_acc,
+                    st.get("five_hour_remaining_pct"),
+                    st.get("weekly_remaining_pct")
+                )
+            logger.info("Muestra inicial registrada en memoria y analiticas exitosamente.")
+        except Exception as e:
+            logger.warning(f"No se pudo capturar muestra inicial: {traceback.format_exc()}")
+            
+    try:
+        while True:
+            # Check if Antigravity is still running
             if not is_antigravity_running():
-                logger.info("Antigravity cerrado. Finalizando daemon ordenadamente.")
-                break
-                
-        # 1. Check if another process holds rotation lock (e.g. manual switch from Dock overlay or CLI)
-        if is_rotation_locked():
-            logger.info("[LOCK] Rotacion en curso por otro proceso. Pausando sondeo y watchdog...")
-            await asyncio.sleep(poll_interval_sec)
-            continue
+                logger.info("Antigravity no detectado en ejecucion. Esperando 5s de gracia...")
+                await asyncio.sleep(5.0)
+                if not is_antigravity_running():
+                    logger.info("Antigravity cerrado. Finalizando daemon ordenadamente.")
+                    break
+                    
+            # 1. Check if another process holds rotation lock (e.g. manual switch from Dock overlay or CLI)
+            if is_rotation_locked():
+                logger.info("[LOCK] Rotacion en curso por otro proceso. Pausando sondeo y watchdog...")
+                await asyncio.sleep(poll_interval_sec)
+                continue
 
-        # 2. Watchdog: cleanup orphan Comet authentication tabs (only when no rotation is in progress)
-        try:
-            cleaned = cleanup_orphan_comet_auth_tabs()
-            if cleaned > 0:
-                logger.info(f"[Watchdog] Cerradas {cleaned} pestana(s) huerfanas de Comet.")
-        except Exception as e:
-            logger.debug(f"[Watchdog] Error limpiando pestanas huerfanas: {e}")
+            # 2. Watchdog: cleanup orphan Comet authentication tabs (only when no rotation is in progress)
+            try:
+                cleaned = cleanup_orphan_comet_auth_tabs()
+                if cleaned > 0:
+                    logger.info(f"[Watchdog] Cerradas {cleaned} pestana(s) huerfanas de Comet.")
+            except Exception as e:
+                logger.debug(f"[Watchdog] Error limpiando pestanas huerfanas: {e}")
+                    
+            try:
+                # 1. Fast check: language_server.log
+                log_exhausted, log_reason = check_log_quota_errors(lookback_seconds=30)
                 
-        try:
-            # 1. Fast check: language_server.log
-            log_exhausted, log_reason = check_log_quota_errors(lookback_seconds=30)
-            
-            # 2. Check chat errors or periodic UI sample
-            async with async_playwright() as p:
-                browser, page = await connect_antigravity(p)
-                ctx = browser.contexts[0]
+                # 2. Reusable CDP connection
+                browser, page = await get_or_reconnect_page()
+                ctx = browser.contexts[0] if browser.contexts else None
                 
                 # Watchdog: ensure dark theme stays enforced
                 await ensure_dark_theme(page)
@@ -475,43 +524,61 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                         conv_id = await get_active_conversation_id(page)
                                         if not conv_id:
                                             try:
-                                                from token_memory import load_memory
                                                 conv_id = load_memory().get("last_active_conversation_id")
                                             except Exception:
                                                 pass
                                         logger.info(f"Guardando ID de conversacion activa: {conv_id}")
                                         
-                                        with RotationLock(owner="daemon_auto_rotation"):
-                                            try:
-                                                success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True, conv_id=conv_id)
-                                                last_switch_time = time.time()
-                                                if success:
-                                                    circuit_breaker.record_success()
-                                                    logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
-                                                    
-                                                    # Analytics & Toast Notifications
-                                                    record_rotation_event(prev, new_acc)
-                                                    new_st = get_effective_account_status(new_acc)
-                                                    record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
-                                                    
-                                                    notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                                        try:
+                                            with RotationLock(owner="daemon_auto_rotation"):
+                                                try:
+                                                    success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True, conv_id=conv_id)
+                                                    last_switch_time = time.time()
+                                                    if success:
+                                                        circuit_breaker.record_success()
+                                                        logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
                                                         
-                                                    if conv_id:
-                                                        logger.info(f"Verificando conversacion {conv_id} activa...")
-                                                        await navigate_to_conversation(page, conv_id)
-                                                else:
-                                                    circuit_breaker.record_failure("Fallo reportado por rotate_account")
-                                                    logger.error("Fallo la rotacion automatica de cuenta.")
-                                            except Exception as rot_exc:
-                                                last_switch_time = time.time()
-                                                circuit_breaker.record_failure(f"Excepción en rotación: {rot_exc}")
-                                                logger.error(f"Excepción en rotación de cuenta: {rot_exc}")
-                                
+                                                        # Analytics & Toast Notifications
+                                                        record_rotation_event(prev, new_acc)
+                                                        new_st = get_effective_account_status(new_acc)
+                                                        record_usage_sample(new_acc, new_st.get("five_hour_remaining_pct"), new_st.get("weekly_remaining_pct"))
+                                                        
+                                                        notify_rotation_success(prev, new_acc, new_st.get("five_hour_remaining_pct"))
+                                                            
+                                                        if conv_id:
+                                                            logger.info(f"Verificando conversacion {conv_id} activa...")
+                                                            await navigate_to_conversation(page, conv_id)
+                                                    else:
+                                                        circuit_breaker.record_failure("Fallo reportado por rotate_account")
+                                                        logger.error("Fallo la rotacion automatica de cuenta.")
+                                                except Exception as rot_exc:
+                                                    last_switch_time = time.time()
+                                                    circuit_breaker.record_failure(f"Excepción en rotación: {rot_exc}")
+                                                    logger.error(f"Excepción en rotación de cuenta: {rot_exc}")
+                                        except TimeoutError as te:
+                                            logger.warning(f"[LOCK] Rotación automática pospuesta por lock ocupado: {te}")
+            except Exception as e:
+                logger.error(f"Error en iteracion del monitor:\n{traceback.format_exc()}")
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    browser = None
+                    page = None
+                
+            await asyncio.sleep(poll_interval_sec)
+    finally:
+        if browser:
+            try:
                 await browser.close()
-        except Exception as e:
-            logger.error(f"Error en iteracion del monitor: {str(e)}")
-            
-        await asyncio.sleep(poll_interval_sec)
+            except Exception:
+                pass
+        if pw_instance:
+            try:
+                await pw_instance.stop()
+            except Exception:
+                pass
 
 def main():
     parser = argparse.ArgumentParser(description="Antigravity Account Controller & Token Memory Monitor")

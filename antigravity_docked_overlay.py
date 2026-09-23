@@ -295,6 +295,18 @@ class WorkerRefreshQuota(QThread):
 
     def run(self):
         try:
+            # 1. Fast path: check if local HUD or memory has fresh data without spawning heavy process
+            import urllib.request
+            try:
+                req = urllib.request.Request("http://127.0.0.1:59123/api/status")
+                with urllib.request.urlopen(req, timeout=1.2) as resp:
+                    if resp.status == 200:
+                        self.finished.emit(True, "Tokens sincronizados vía Local HUD")
+                        return
+            except Exception:
+                pass
+
+            # 2. Subprocess fallback
             cmd = [sys.executable, str(DAEMON_SCRIPT), "--status"]
             startupinfo = None
             creationflags = 0
@@ -1566,9 +1578,9 @@ class AntigravityDockedOverlay(QWidget):
         self.panel_container.setGraphicsEffect(self.panel_opacity)
         self.panel_opacity.setOpacity(0.0)
 
-        # 2. Breathing / Pulse Heartbeat Timer (80ms interval)
+        # 2. Breathing / Pulse Heartbeat Timer (120ms interval for smooth low-CPU breathing)
         self.pulse_timer = QTimer(self)
-        self.pulse_timer.setInterval(80)
+        self.pulse_timer.setInterval(120)
         self.pulse_timer.timeout.connect(self.on_pulse_tick)
         self.pulse_timer.start()
 
@@ -1578,8 +1590,8 @@ class AntigravityDockedOverlay(QWidget):
         self.sync_timer.timeout.connect(self.on_sync_spin)
 
     def on_pulse_tick(self):
-        # Never waste frame cycles during slide animation
-        if self.slide_anim.state() == QAbstractAnimation.State.Running:
+        # Never waste frame cycles when hidden or during slide animation
+        if not self.isVisible() or self.slide_anim.state() == QAbstractAnimation.State.Running:
             return
         val = 0.5 + 0.5 * math.sin(time.time() * 3.2)
         self.pill_handle.set_pulse(val)
@@ -1701,9 +1713,9 @@ class AntigravityDockedOverlay(QWidget):
             WINEVENT_OUTOFCONTEXT
         )
 
-        # High-speed heartbeat timer (25ms)
+        # Adaptive heartbeat timer (150ms instead of 25ms, since WinEventHook handles real-time moves)
         self.dock_timer = QTimer(self)
-        self.dock_timer.setInterval(25)
+        self.dock_timer.setInterval(150)
         self.dock_timer.timeout.connect(self.update_dock_position)
         self.dock_timer.start()
 
@@ -1864,6 +1876,18 @@ class AntigravityDockedOverlay(QWidget):
         my_win_id = int(self.winId()) if self.isVisible() else 0
         fg = user32.GetForegroundWindow()
 
+        # If Antigravity or this overlay is the active foreground window, it is not occluded
+        if fg == self.antigravity_hwnd or (my_win_id and fg == my_win_id):
+            self._last_occlusion_val = False
+            self._last_occlusion_time = time.time()
+            self._last_fg_hwnd = fg
+            return False
+
+        now = time.time()
+        if hasattr(self, "_last_occlusion_time") and (now - self._last_occlusion_time) < 0.25:
+            if getattr(self, "_last_fg_hwnd", None) == fg:
+                return getattr(self, "_last_occlusion_val", False)
+
         # Get Antigravity process ID to differentiate own dialogs/windows from other apps
         pid_ag = wintypes.DWORD()
         user32.GetWindowThreadProcessId(self.antigravity_hwnd, ctypes.byref(pid_ag))
@@ -1944,6 +1968,9 @@ class AntigravityDockedOverlay(QWidget):
                                     return True
             curr = user32.GetWindow(curr, GW_HWNDPREV)
 
+        self._last_occlusion_val = False
+        self._last_occlusion_time = time.time()
+        self._last_fg_hwnd = fg
         return False
 
     def update_dock_position(self, force: bool = False):
@@ -1988,6 +2015,17 @@ class AntigravityDockedOverlay(QWidget):
                             self.toggle_expanded()
                             return
 
+        ag_rect = wintypes.RECT()
+        hr = dwmapi.DwmGetWindowAttribute(self.antigravity_hwnd, 9, ctypes.byref(ag_rect), ctypes.sizeof(ag_rect))
+        if hr != 0:
+            user32.GetWindowRect(self.antigravity_hwnd, ctypes.byref(ag_rect))
+        ag_box = (ag_rect.left, ag_rect.top, ag_rect.right, ag_rect.bottom)
+
+        if not force and self.last_rect is not None and getattr(self, "_last_ag_box", None) == ag_box and getattr(self, "_last_dock_expanded", None) == self.is_expanded:
+            return
+        self._last_ag_box = ag_box
+        self._last_dock_expanded = self.is_expanded
+
         target_x, target_y, widget_w, widget_h, mode = self.calculate_dock_geometry(for_expanded=self.is_expanded)
         self.set_dock_mode(mode)
 
@@ -2022,14 +2060,15 @@ class AntigravityDockedOverlay(QWidget):
         try:
             from token_memory import get_effective_account_status, load_memory
             mem = load_memory()
-            active_acc = mem.get("active_account", "")
+            active_acc = (mem.get("active_account") or "").strip()
+            active_display = active_acc.split('@')[0] if active_acc else "Sin cuenta"
 
             # 1. Update data for all cards
             account_statuses = {}
             for email, card in self.account_cards.items():
                 st = get_effective_account_status(email)
                 account_statuses[email] = st
-                is_active = (email.split("@")[0].lower() in active_acc.lower())
+                is_active = bool(active_acc and (email.split("@")[0].lower() in active_acc.lower()))
                 card.update_data(st, is_active)
 
             # 2. Dynamic Smart Sorting:
@@ -2037,7 +2076,7 @@ class AntigravityDockedOverlay(QWidget):
             # - Cuentas con cuota disponible: EN MEDIO (rank 1, mayor cuota primero)
             # - Cuentas con cuota agotada: HASTA ABAJO (rank 2, menor tiempo de recarga primero)
             def sort_rank(email: str):
-                is_active = (email.split("@")[0].lower() in active_acc.lower())
+                is_active = bool(active_acc and (email.split("@")[0].lower() in active_acc.lower()))
                 if is_active:
                     return (0, 0)
 
@@ -2084,11 +2123,11 @@ class AntigravityDockedOverlay(QWidget):
             if updated_at and not self.switching:
                 from datetime import datetime
                 dt = datetime.fromisoformat(updated_at)
-                self.status_line.setText(f"● Sincronizado: {dt.strftime('%H:%M:%S')} • Activa: {active_acc.split('@')[0]}{pinned_str}{auto_str}")
+                self.status_line.setText(f"● Sincronizado: {dt.strftime('%H:%M:%S')} • Activa: {active_display}{pinned_str}{auto_str}")
                 self.status_line.setStyleSheet("color: #64748b;" if auto_enabled else "color: #fbbf24;")
 
             if hasattr(self, "tray_icon"):
-                self.tray_icon.setToolTip(f"Antigravity Token Dock\nActiva: {active_acc.split('@')[0]}\nAuto: {'Sí' if auto_enabled else 'Pausado'}")
+                self.tray_icon.setToolTip(f"Antigravity Token Dock\nActiva: {active_display}\nAuto: {'Sí' if auto_enabled else 'Pausado'}")
         except Exception as e:
             self.status_line.setText(f"Error memoria: {e}")
 
@@ -2392,8 +2431,13 @@ class AntigravityDockedOverlay(QWidget):
         self.refresh_memory_data()
 
     def closeEvent(self, event):
-        if hasattr(self, "hotkey_thread"):
+        if hasattr(self, "switch_worker") and self.switch_worker.isRunning():
+            self.switch_worker.wait(1000)
+        if hasattr(self, "refresh_worker") and self.refresh_worker.isRunning():
+            self.refresh_worker.wait(1000)
+        if hasattr(self, "hotkey_thread") and self.hotkey_thread.isRunning():
             self.hotkey_thread.stop()
+            self.hotkey_thread.wait(1000)
         if hasattr(self, "tray_icon"):
             self.tray_icon.hide()
         if hasattr(self, "win_event_hook") and self.win_event_hook:

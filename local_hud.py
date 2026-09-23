@@ -548,6 +548,15 @@ class HUDRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/switch":
             logger.info("Manual switch triggered via Local HUD API!")
+            from daemon_service import is_rotation_locked
+            if is_rotation_locked():
+                self.send_response(409)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "message": "Ya hay una rotación en curso."}).encode("utf-8"))
+                return
+
             switch_script = os.path.join(SCRIPT_DIR, "daemon_service.py")
             startupinfo = None
             creationflags = 0

@@ -8,6 +8,8 @@ import os
 import re
 import json
 import logging
+import hashlib
+import copy
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -16,6 +18,23 @@ logger = logging.getLogger("TokenMemory")
 MEMORY_DIR = os.path.expandvars(r"%USERPROFILE%\.openclaw\workspace\state\antigravity_controller")
 MEMORY_FILE = os.path.join(MEMORY_DIR, "token_memory.json")
 os.makedirs(MEMORY_DIR, exist_ok=True)
+
+_cached_memory: Optional[Dict[str, Any]] = None
+_cached_memory_mtime: float = 0.0
+_last_disk_hash: Optional[str] = None
+
+def _compute_data_hash(data: Dict[str, Any]) -> str:
+    """Computes a fast content hash excluding timestamp to detect real changes."""
+    payload = {
+        "active_account": data.get("active_account"),
+        "auto_switch_enabled": data.get("auto_switch_enabled"),
+        "pinned_account": data.get("pinned_account"),
+        "sound_enabled": data.get("sound_enabled"),
+        "last_active_conversation_id": data.get("last_active_conversation_id"),
+        "accounts": data.get("accounts", {})
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.md5(raw).hexdigest()
 
 try:
     from config_manager import get_authorized_emails
@@ -105,8 +124,18 @@ def _default_memory_factory() -> Dict[str, Any]:
         "accounts": {}
     }
 
-def load_memory() -> Dict[str, Any]:
-    """Loads token memory persistently from disk with corrupt recovery and retry tolerance."""
+def load_memory(force_reload: bool = False) -> Dict[str, Any]:
+    """Loads token memory persistently from disk with corrupt recovery, mtime caching, and retry tolerance."""
+    global _cached_memory, _cached_memory_mtime, _last_disk_hash
+
+    if not force_reload and _cached_memory is not None and os.path.exists(MEMORY_FILE):
+        try:
+            mtime = os.path.getmtime(MEMORY_FILE)
+            if mtime == _cached_memory_mtime:
+                return copy.deepcopy(_cached_memory)
+        except Exception:
+            pass
+
     from atomic_state import SafeJsonStore
     data = SafeJsonStore.load_json(MEMORY_FILE, _default_memory_factory)
         
@@ -155,13 +184,28 @@ def load_memory() -> Dict[str, Any]:
                         "disabled": False
                     }
                     
+    _cached_memory = copy.deepcopy(data)
+    _cached_memory_mtime = os.path.getmtime(MEMORY_FILE) if os.path.exists(MEMORY_FILE) else 0.0
+    _last_disk_hash = _compute_data_hash(data)
     return data
 
-def save_memory(data: Dict[str, Any]):
-    """Saves memory atomically to disk with unique temp file and Windows WinError 32 retry."""
+def save_memory(data: Dict[str, Any], force: bool = False) -> bool:
+    """Saves memory atomically to disk with unique temp file, dirty-checking hash, and Windows retry."""
+    global _cached_memory, _cached_memory_mtime, _last_disk_hash
     from atomic_state import SafeJsonStore
+
+    current_hash = _compute_data_hash(data)
+    if not force and _last_disk_hash == current_hash and os.path.exists(MEMORY_FILE):
+        # Data is clean (identical content); avoid disk write overhead
+        _cached_memory = copy.deepcopy(data)
+        return False
+
     data["updated_at"] = datetime.now().isoformat()
     SafeJsonStore.save_json(MEMORY_FILE, data)
+    _cached_memory = copy.deepcopy(data)
+    _cached_memory_mtime = os.path.getmtime(MEMORY_FILE) if os.path.exists(MEMORY_FILE) else 0.0
+    _last_disk_hash = current_hash
+    return True
 
 def update_account_snapshot(
     email: str,
@@ -181,8 +225,10 @@ def update_account_snapshot(
     norm_email = email.strip().lower()
     
     target_key = None
+    norm_user = norm_email.split("@")[0]
     for acc in data["accounts"]:
-        if acc.split("@")[0].lower() in norm_email:
+        acc_norm = acc.lower().strip()
+        if acc_norm == norm_email or acc_norm.split("@")[0] == norm_user:
             target_key = acc
             break
             
@@ -295,7 +341,8 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
     """
     data = load_memory()
     norm = email.strip().lower()
-    target_key = next((k for k in data["accounts"] if k.split("@")[0].lower() in norm), norm)
+    norm_user = norm.split("@")[0]
+    target_key = next((k for k in data["accounts"] if k.lower().strip() == norm or k.split("@")[0].lower().strip() == norm_user), norm)
     acc = data["accounts"].get(target_key, _init_empty_account_record())
     
     now = datetime.now()
@@ -363,16 +410,23 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
 def evaluate_switch_readiness(current_email: str) -> Tuple[bool, str, Optional[int], Optional[str]]:
     """
     Evaluates which authorized account is optimal to switch to.
-    Ranks the other 2 authorized accounts:
+    Ranks the other authorized accounts:
     1. Unsampled accounts are prioritized to gather status.
     2. Accounts with available tokens (>0%) ranked by highest remaining tokens.
     3. If all candidates are exhausted, picks the one closest to its recharge ETA.
     Returns: (can_switch, reason, wait_seconds_if_any, best_target_account)
     """
     norm = current_email.strip().lower()
+    norm_user = norm.split("@")[0]
+    try:
+        from config_manager import get_authorized_emails
+        authorized = get_authorized_emails()
+    except Exception:
+        authorized = DEFAULT_ACCOUNTS
+
     candidate_emails = [
-        acc for acc in DEFAULT_ACCOUNTS
-        if acc.split("@")[0].lower() not in norm
+        acc for acc in authorized
+        if acc.strip().lower() != norm and acc.split("@")[0].strip().lower() != norm_user
     ]
     
     if not candidate_emails:

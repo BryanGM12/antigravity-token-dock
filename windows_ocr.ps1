@@ -3,24 +3,31 @@ param(
     [string]$ImagePath
 )
 
+$fullPath = [System.IO.Path]::GetFullPath($ImagePath)
+if (-not (Test-Path -LiteralPath $fullPath)) {
+    Write-Output "[]"
+    exit 0
+}
+
 try {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
     [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime] | Out-Null
     [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime] | Out-Null
     [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
 
-    function Await-AsyncOp($asyncOp, [Type]$returnType) {
-        $methods = [System.WindowsRuntimeSystemExtensions].GetMethods()
-        $asTask = $methods | Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } | Select-Object -First 1
-        $concrete = $asTask.MakeGenericMethod($returnType)
-        $task = $concrete.Invoke($null, @($asyncOp))
-        return $task.GetAwaiter().GetResult()
-    }
+    # Cache AsTask reflection and generic method instantiations for zero-overhead async resolution
+    $script:asTaskGeneric = [System.WindowsRuntimeSystemExtensions].GetMethods() | 
+        Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } | 
+        Select-Object -First 1
 
-    $fullPath = [System.IO.Path]::GetFullPath($ImagePath)
-    if (-not (Test-Path $fullPath)) {
-        Write-Output "[]"
-        exit 0
+    $script:methodCache = @{}
+
+    function Await-AsyncOp($asyncOp, [Type]$returnType) {
+        if (-not $script:methodCache.ContainsKey($returnType)) {
+            $script:methodCache[$returnType] = $script:asTaskGeneric.MakeGenericMethod($returnType)
+        }
+        $task = $script:methodCache[$returnType].Invoke($null, @($asyncOp))
+        return $task.GetAwaiter().GetResult()
     }
 
     $file = Await-AsyncOp ([Windows.Storage.StorageFile]::GetFileFromPathAsync($fullPath)) ([Windows.Storage.StorageFile])
@@ -38,7 +45,7 @@ try {
 
     $ocrResult = Await-AsyncOp ($engine.RecognizeAsync($softBmp)) ([Windows.Media.Ocr.OcrResult])
 
-    $items = @()
+    $items = [System.Collections.Generic.List[psobject]]::new(64)
     foreach ($line in $ocrResult.Lines) {
         if ($line.Words.Count -eq 0) { continue }
         $minX = [double]::MaxValue
@@ -58,7 +65,7 @@ try {
             if (($wx + $ww) -gt $maxX) { $maxX = ($wx + $ww) }
             if (($wy + $wh) -gt $maxY) { $maxY = ($wy + $wh) }
 
-            $items += [PSCustomObject]@{
+            $items.Add([PSCustomObject]@{
                 type = "word"
                 text = $word.Text
                 x = [int][Math]::Round($wx)
@@ -67,13 +74,13 @@ try {
                 h = [int][Math]::Round($wh)
                 cx = [int][Math]::Round($wx + ($ww / 2.0))
                 cy = [int][Math]::Round($wy + ($wh / 2.0))
-            }
+            })
         }
 
         # Add full line entry
         $lw = $maxX - $minX
         $lh = $maxY - $minY
-        $items += [PSCustomObject]@{
+        $items.Add([PSCustomObject]@{
             type = "line"
             text = $line.Text
             x = [int][Math]::Round($minX)
@@ -82,11 +89,15 @@ try {
             h = [int][Math]::Round($lh)
             cx = [int][Math]::Round($minX + ($lw / 2.0))
             cy = [int][Math]::Round($minY + ($lh / 2.0))
-        }
+        })
     }
 
-    $json = $items | ConvertTo-Json -Compress
-    Write-Output $json
+    if ($items.Count -eq 0) {
+        Write-Output "[]"
+    } else {
+        $json = $items | ConvertTo-Json -Compress
+        Write-Output $json
+    }
 }
 catch {
     Write-Output "[]"

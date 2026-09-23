@@ -43,19 +43,29 @@ def determine_target_account(current_email: str) -> str:
     using token_memory evaluation (ranking by highest available tokens or earliest recharge).
     """
     norm = current_email.strip().lower()
+    norm_user = norm.split("@")[0]
     from token_memory import evaluate_switch_readiness
     
+    try:
+        from config_manager import get_authorized_emails
+        authorized = set(acc.lower().strip() for acc in get_authorized_emails())
+    except Exception:
+        authorized = set(acc.lower().strip() for acc in AUTHORIZED_ACCOUNTS)
+        
     can_switch, reason, wait_secs, best_target = evaluate_switch_readiness(norm)
-    if best_target and best_target.lower() in AUTHORIZED_ACCOUNTS:
+    if best_target and best_target.lower().strip() in authorized:
         return best_target
         
     # Deterministic fallback round-robin
-    candidates = [acc for acc in AUTHORIZED_ACCOUNTS if acc.split("@")[0].lower() not in norm]
+    candidates = [
+        acc for acc in authorized
+        if acc.strip().lower() != norm and acc.split("@")[0].lower().strip() != norm_user
+    ]
     if candidates:
         return sorted(list(candidates))[0]
         
     raise ValueError(
-        f"Current email '{current_email}' is not in authorized list ({sorted(list(AUTHORIZED_ACCOUNTS))}). Aborting."
+        f"Current email '{current_email}' is not in authorized list ({sorted(list(authorized))}). Aborting."
     )
 
 async def programmatic_sign_out(page: Page) -> bool:
@@ -402,10 +412,33 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
         poll_start = time.time()
         while not auth_event.is_set() and (time.time() - poll_start) < 300.0:
             try:
-                if await is_authenticated_in_dom(page):
-                    auth_event.set()
-                    logger.info("[AUTH-SYNC] Autenticación detectada en Antigravity DOM en tiempo real.")
-                    break
+                if is_already_onboarding:
+                    if await is_authenticated_in_dom(page):
+                        auth_event.set()
+                        logger.info("[AUTH-SYNC] Autenticación detectada en Antigravity DOM tras onboarding.")
+                        break
+                else:
+                    # In RE_SIGN_IN mode, we were already signed in to current_email.
+                    # ONLY fire if the session context has flipped to target_email or away from current_email!
+                    live_email = await page.evaluate(r'''() => {
+                        let core = window.__antigravityCore;
+                        if (!core?.authService) return null;
+                        try {
+                            const st = core.authService.authStateProvider?.getState?.();
+                            if (st?.state === "signedIn") {
+                                return st?.context?.userEmail || null;
+                            }
+                        } catch (e) {}
+                        return null;
+                    }''')
+                    if live_email:
+                        live_lower = live_email.lower().strip()
+                        target_prefix = target_email.split("@")[0].lower()
+                        current_prefix = current_email.split("@")[0].lower()
+                        if target_prefix in live_lower or (live_lower != current_email.lower() and current_prefix not in live_lower):
+                            auth_event.set()
+                            logger.info(f"[AUTH-SYNC] Cambio a cuenta objetivo ({live_email}) detectado en tiempo real.")
+                            break
             except Exception:
                 pass
             await asyncio.sleep(0.04)
@@ -466,10 +499,12 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     await close_settings(page)
     effective_new = new_email or target_email
     
-    if new_email and target_email.split("@")[0].lower() in new_email.lower():
+    rotated_ok = bool(new_email and (target_email.split("@")[0].lower() in new_email.lower() or new_email.lower() != current_email.lower()))
+    if rotated_ok:
         logger.info(f"Successfully rotated and verified account: {new_email}!")
     else:
-        logger.warning(f"Rotation complete. Active email detected: {new_email or effective_new}")
+        logger.error(f"Rotation verification failed. Active email remains: {new_email or effective_new} (Expected: {target_email})")
+        return False, current_email, effective_new
         
     # 8. Sample and update token memory for the newly active account
     try:
