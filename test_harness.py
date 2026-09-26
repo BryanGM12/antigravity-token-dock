@@ -34,9 +34,28 @@ from goal_resumer import analyze_chat_state
 from notification_service import send_windows_toast
 from circuit_breaker import RotationCircuitBreaker
 from atomic_state import SafeJsonStore
+from cloud_code_client import (
+    CLOUD_CODE_ENDPOINT,
+    CLOUD_CODE_FALLBACK_ENDPOINT,
+    DEFAULT_USER_AGENT,
+    query_cloud_code_quota_direct,
+    parse_cloud_code_quota_response,
+    monitor_accounts_parallel,
+    save_account_token,
+    get_account_token
+)
+from quota_detector import get_decoupled_parallel_quotas
+from account_rotator import (
+    SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT,
+    sign_out,
+    is_task_in_progress,
+    safe_language_server_guard,
+    rollback_to_functional_session,
+    is_authenticated_in_dom
+)
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (32 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (38 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -415,7 +434,80 @@ async def run_all_tests():
         except Exception:
             pass
 
-    print("\n--- TODOS LOS 32 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 33. Capa 1: Consulta HTTPS Directa Desacoplada a Google Cloud Code
+    res_direct = query_cloud_code_quota_direct()
+    assert res_direct.get("endpoint_used") in [CLOUD_CODE_ENDPOINT, CLOUD_CODE_FALLBACK_ENDPOINT], "Debe usar endpoint de Google Cloud Code"
+    assert res_direct.get("status") in ["UNAUTHENTICATED", "OK", "RATE_LIMITED"], f"Status debe ser válido (obtenido: {res_direct.get('status')})"
+    assert res_direct.get("code") in [401, 200, 429], f"Código HTTP debe ser 401/200/429 (obtenido: {res_direct.get('code')})"
+    print(f"[PASS] 33. Capa 1: Consulta HTTPS directa a Google Cloud Code: Status={res_direct.get('status')} (HTTP {res_direct.get('code')}), User-Agent='{DEFAULT_USER_AGENT}'.")
+
+    # 34. Capa 1: Parser de Quotas Protobuf/JSON de Cloud Code
+    mock_payload = {
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {"bucketId": "weekly", "remaining": {"value": 0.88, "case": "remainingFraction"}, "description": "refresh in 2 days", "resetTime": {"seconds": 1790400000}},
+                        {"bucketId": "5h", "remaining": {"value": 0.72, "case": "remainingFraction"}, "description": "refresh in 3 hours", "resetTime": {"seconds": 1790300000}}
+                    ]
+                },
+                {
+                    "displayName": "Claude & Other Models",
+                    "buckets": [
+                        {"bucketId": "weekly", "remaining": {"value": 1.0, "case": "remainingFraction"}, "description": "refresh in 5 days"}
+                    ]
+                }
+            ]
+        }
+    }
+    parsed = parse_cloud_code_quota_response(mock_payload, email="atteelsidas@gmail.com")
+    assert parsed.get("five_hour_remaining_pct") == 72, f"Gemini 5h debe ser 72% (obtenido: {parsed.get('five_hour_remaining_pct')})"
+    assert parsed.get("weekly_remaining_pct") == 88, f"Gemini Wk debe ser 88% (obtenido: {parsed.get('weekly_remaining_pct')})"
+    assert parsed.get("gemini", {}).get("five_hour_refresh_text") == "3 hours"
+    assert parsed.get("claude_gpt", {}).get("weekly_remaining_pct") == 100
+    assert parsed.get("is_exhausted") is False
+    print(f"[PASS] 34. Capa 1: Parser Protobuf/JSON de Cloud Code verificado: Gemini 5h={parsed.get('five_hour_remaining_pct')}%, Weekly={parsed.get('weekly_remaining_pct')}%, Claude Wk={parsed.get('claude_gpt', {}).get('weekly_remaining_pct')}%.")
+
+    # 35. Capa 1: Monitoreo Desacoplado en Paralelo de las 4 Cuentas
+    parallel_res = get_decoupled_parallel_quotas()
+    assert len(parallel_res) == 4, f"Debe monitorear las 4 cuentas configuradas (obtenidas: {len(parallel_res)})"
+    expected_emails = ["atteelsidas@gmail.com", "delsidasatte@gmail.com", "gilsamaniego12m@gmail.com", "tom12bryan@gmail.com"]
+    for acc in expected_emails:
+        assert acc in parallel_res, f"Cuenta {acc} debe estar presente en el monitoreo paralelo"
+        acc_st = parallel_res[acc]
+        assert "weekly_remaining_pct" in acc_st or "five_hour_remaining_pct" in acc_st, f"Cuenta {acc} debe contener métricas de cuota"
+    print(f"[PASS] 35. Capa 1: Monitoreo Desacoplado en Paralelo de 4 Cuentas verificado: Cuentas={[acc.split('@')[0] for acc in parallel_res.keys()]}.")
+
+    # 36. Capa 2: Salvaguarda Total de Tokens contra Logout Destructivo
+    assert SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT is True, "SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT debe estar activo"
+    async with async_playwright() as p:
+        browser, page = await connect_antigravity(p)
+        sign_out_blocked = await sign_out(page, force_allow=False)
+        assert sign_out_blocked is False, "sign_out() destructivo DEBE ser bloqueado por la salvaguarda"
+        is_still_auth = await is_authenticated_in_dom(page)
+        assert is_still_auth is True, "Antigravity debe permanecer 100% autenticado y operativo"
+        current_acc = await get_current_logged_in_email(page, close_after=False)
+        assert current_acc is not None, "El correo de la sesión activa debe preservarse intacto"
+        print(f"[PASS] 36. Capa 2: Salvaguarda Total de Tokens verificada: sign_out() destructivo bloqueado, sesión activa={current_acc}.")
+
+        # 37. Capa 2: Protección de Tareas Activas y language_server.exe
+        task_busy, busy_desc = await is_task_in_progress(page)
+        assert isinstance(task_busy, bool), "is_task_in_progress debe devolver un estado booleano"
+        ls_safe = safe_language_server_guard()
+        assert ls_safe is True, "language_server_guard debe reportar language_server.exe vivo y protegido"
+        print(f"[PASS] 37. Capa 2: Protección de Tareas y language_server verificada: Busy={task_busy} ({busy_desc}), LS Protegido={ls_safe}.")
+
+        # 38. Capa 2: Rollback Inmediato y Garantía Anti-Caídas de Sesión
+        rb_ok = await rollback_to_functional_session(page, current_acc)
+        assert rb_ok is True, "rollback_to_functional_session debe confirmar sesión funcional activa y protegida"
+        assert await is_authenticated_in_dom(page) is True, "Sesión debe continuar autenticada"
+        print(f"[PASS] 38. Capa 2: Rollback Inmediato y Garantía Anti-Caídas verificado: Cuenta restaurada/mantenida={current_acc}.")
+
+        await close_settings(page)
+        await browser.close()
+
+    print("\n--- TODOS LOS 38 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

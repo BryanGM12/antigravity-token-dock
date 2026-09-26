@@ -71,9 +71,16 @@ from quota_detector import (
     get_quota_limits,
     evaluate_token_exhaustion,
     check_log_quota_errors,
-    check_chat_quota_errors
+    check_chat_quota_errors,
+    get_decoupled_parallel_quotas
 )
-from account_rotator import rotate_account, determine_target_account
+from account_rotator import (
+    rotate_account,
+    determine_target_account,
+    is_task_in_progress,
+    safe_language_server_guard,
+    rollback_to_functional_session
+)
 from task_resumer import navigate_to_conversation, resume_conversation_task
 from goal_resumer import resume_with_context, clear_hung_generation
 from token_memory import (
@@ -528,7 +535,16 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                             except Exception:
                                                 pass
                                         logger.info(f"Guardando ID de conversacion activa: {conv_id}")
-                                        
+
+                                        # Capa 2 Safeguard: Verify no AI response generation in progress
+                                        task_busy, busy_desc = await is_task_in_progress(page)
+                                        if task_busy:
+                                            logger.warning(f"[SAFEGUARD] Tarea activa en curso ({busy_desc}). Rotación automática pospuesta para no interrumpir el trabajo de la IA.")
+                                            await asyncio.sleep(5.0)
+                                            continue
+
+                                        safe_language_server_guard()
+
                                         try:
                                             with RotationLock(owner="daemon_auto_rotation"):
                                                 try:

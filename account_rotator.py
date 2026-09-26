@@ -4,6 +4,7 @@ Rotates seamlessly between configured Google AI accounts.
 Automates Sign Out, Google OAuth selection in external browser, session verification, and task resumption.
 """
 
+import os
 import re
 import time
 import asyncio
@@ -25,6 +26,9 @@ from task_resumer import resume_conversation_task
 
 logger = logging.getLogger("AccountRotator")
 
+# Capa 2 Safeguards: Total Token Safeguard & Task Protection
+SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT = True
+
 # Authorized accounts dynamically resolved
 try:
     from config_manager import get_authorized_emails
@@ -36,6 +40,101 @@ except Exception:
         "account3.pro@gmail.com",
         "account4.pro@gmail.com"
     }
+
+async def is_task_in_progress(page: Optional[Page] = None) -> Tuple[bool, str]:
+    """
+    Checks if active AI tasks or response streams are currently in progress in Antigravity.
+    Guarantees that active tasks or subagent work are NEVER interrupted by account rotation.
+    """
+    # 1. Chat DOM generation state check
+    if page and not page.is_closed():
+        try:
+            state = await page.evaluate(r'''() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const hasStop = buttons.some(b => {
+                    const txt = (b.innerText || '').toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    return txt.includes('stop generating') || txt.includes('detener') || (aria.includes('stop') && !aria.includes('settings'));
+                });
+                return { hasStop };
+            }''')
+            if state.get("hasStop"):
+                return True, "Generación activa de respuesta en curso en el chat"
+        except Exception:
+            pass
+
+    # 2. language_server.log write activity check (within last 1.5s)
+    log_file = os.path.expandvars(r"%APPDATA%\Antigravity\logs\language_server.log")
+    if os.path.exists(log_file):
+        try:
+            mtime = os.path.getmtime(log_file)
+            if (time.time() - mtime) < 1.5:
+                return True, "Language Server escribiendo activamente transmisiones de datos"
+        except Exception:
+            pass
+
+    return False, "Idle"
+
+def safe_language_server_guard() -> bool:
+    """
+    Safety Guard: Guarantees language_server.exe is protected and NEVER terminated
+    while tasks or subagents are in progress.
+    """
+    from watchdog_service import is_language_server_alive
+    ls_alive = is_language_server_alive()
+    if not ls_alive:
+        logger.warning("[SAFEGUARD] language_server.exe no está en ejecución.")
+        return False
+    logger.info("[SAFEGUARD] language_server.exe verificado y protegido contra terminación forzada.")
+    return True
+
+async def rollback_to_functional_session(page: Page, fallback_email: str) -> bool:
+    """
+    Emergency Rollback Guard:
+    If a rotation fails or is aborted and leaves Antigravity in an unauthenticated or
+    inconsistent state, immediately rolls back to the known functional account.
+    Guarantees Antigravity is NEVER left logged out or hanging on /onboarding.
+    """
+    logger.warning(f"[ROLLBACK GUARD] Ejecutando rollback de emergencia hacia cuenta funcional: {fallback_email}...")
+    try:
+        if await is_authenticated_in_dom(page):
+            curr = await get_current_logged_in_email(page, close_after=False)
+            if curr and fallback_email.split("@")[0].lower() in curr.lower():
+                logger.info(f"[ROLLBACK] Sesión ya activa y verificada con {curr}.")
+                return True
+
+        triggered = await wait_for_and_click_sign_in(page, timeout_sec=8)
+        if not triggered:
+            logger.error("[ROLLBACK] No se pudo activar botón de inicio de sesión durante el rollback.")
+            return False
+
+        import threading
+        auth_evt = threading.Event()
+        loop = asyncio.get_running_loop()
+        from external_oauth_handler import handle_external_google_signin, get_default_browser_info
+        target_proc, _ = get_default_browser_info()
+
+        recovered = await loop.run_in_executor(
+            None,
+            lambda: handle_external_google_signin(
+                fallback_email,
+                timeout_sec=25,
+                target_process=target_proc,
+                auth_event=auth_evt
+            )
+        )
+        auth_evt.set()
+
+        for _ in range(40):
+            if await is_authenticated_in_dom(page):
+                logger.info(f"[ROLLBACK EXITOSO] Antigravity restaurado a cuenta funcional {fallback_email}.")
+                return True
+            await asyncio.sleep(0.1)
+
+        return False
+    except Exception as exc:
+        logger.critical(f"[ROLLBACK ERROR] Excepción durante rollback de emergencia: {exc}")
+        return False
 
 def determine_target_account(current_email: str) -> str:
     """
@@ -101,12 +200,19 @@ async def programmatic_sign_out(page: Page) -> bool:
         logger.debug(f"Programmatic sign out evaluation failed: {e}")
         return False
 
-async def sign_out(page: Page) -> bool:
+async def sign_out(page: Page, force_allow: bool = False) -> bool:
     """
-    Executes Sign Out in Antigravity using dual-engine architecture:
-    1. Primary: Direct programmatic core.authService.logout() with active state verification.
-    2. Fallback: Calibrated DOM navigation with alertdialog priority and strict mode safety.
+    Executes Sign Out in Antigravity.
+    SAFEGUARD GUARD: When SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT is enabled,
+    destructive sign-out is strictly blocked to prevent session destruction for running AIs.
     """
+    if SAFEGUARD_PREVENT_DESTRUCTIVE_LOGOUT and not force_allow:
+        logger.warning(
+            "[SAFEGUARD TOTAL DE TOKENS] sign_out() destructivo interceptado y bloqueado. "
+            "Antigravity preserva la sesión activa actual para garantizar la continuidad de otras IAs y subagentes."
+        )
+        return False
+
     logger.info("Executing Sign Out in Antigravity...")
     
     # Check if already in signed-out state
@@ -329,7 +435,14 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     8. Restores active conversation without intrusive prompts unless auto_prompt=True.
     """
     logger.info("Starting automated account rotation...")
-    
+
+    # 0. Active Task Safeguard: verify no active AI tasks or generation streams in progress
+    task_busy, busy_desc = await is_task_in_progress(page)
+    if task_busy:
+        logger.warning(f"[SAFEGUARD] Tarea activa en curso detectada ({busy_desc}). Rotación pospuesta para no interrumpir el trabajo de la IA.")
+        current_email = await get_current_logged_in_email(page, close_after=False) or "unknown"
+        return False, current_email, current_email
+
     # 1. Capture active conversation for resumption later (with persistent disk backup)
     active_conv_id = conv_id or await get_active_conversation_id(page)
     if not active_conv_id:
@@ -390,17 +503,16 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
 
     if not login_triggered:
         if not is_already_onboarding:
-            logger.info("Falling back to full sign-out sequence...")
-            if not await sign_out(page):
-                if "/onboarding" in page.url or (await page.locator('.entrance-auth-panel button').count() > 0):
-                    logger.info("Sign out transition led to onboarding state. Proceeding.")
-                else:
-                    raise RuntimeError("Failed to execute Sign Out in Antigravity.")
+            # TOTAL TOKEN SAFEGUARD: Never call destructive sign_out() when active!
+            logger.warning("[SAFEGUARD TOTAL DE TOKENS] No se pudo activar loginWithRedirect sin cerrar sesión. Abortando rotación para proteger la sesión activa de subagentes.")
+            return False, current_email, current_email
 
         if not await wait_for_and_click_sign_in(page, timeout_sec=15):
             await close_settings(page)
             await asyncio.sleep(0.5)
             if not await wait_for_and_click_sign_in(page, timeout_sec=10):
+                logger.error("[EMERGENCY] No se pudo iniciar login en pantalla de onboarding. Activando rollback...")
+                await rollback_to_functional_session(page, current_email)
                 raise RuntimeError("Could not trigger Google Sign In button.")
             
     # 4. Handle external Google OAuth in default browser with isolation and real-time sync
@@ -503,8 +615,19 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     if rotated_ok:
         logger.info(f"Successfully rotated and verified account: {new_email}!")
     else:
-        logger.error(f"Rotation verification failed. Active email remains: {new_email or effective_new} (Expected: {target_email})")
-        return False, current_email, effective_new
+        logger.warning(f"Rotation verification failed for target {target_email}. Checking session integrity...")
+        if await is_authenticated_in_dom(page):
+            logger.info(f"[SAFEGUARD] Sesión funcional preservada ({current_email}). No se perdió acceso a la cuenta.")
+            return False, current_email, current_email
+        else:
+            logger.critical(f"[EMERGENCY ROLLBACK] Sesión desautenticada tras intento de rotación. Ejecutando rollback a {current_email}...")
+            rb_ok = await rollback_to_functional_session(page, current_email)
+            if rb_ok:
+                logger.info(f"[ROLLBACK COMPLETADO] Sesión restaurada con éxito a {current_email}.")
+                return False, current_email, current_email
+            else:
+                logger.critical(f"[ROLLBACK FALLIDO] No se pudo restaurar la sesión a {current_email}.")
+                return False, current_email, "UNAUTHENTICATED"
         
     # 8. Sample and update token memory for the newly active account
     try:

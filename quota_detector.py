@@ -9,9 +9,21 @@ import re
 import time
 import asyncio
 import logging
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from playwright.async_api import Page
 from antigravity_bridge import open_settings, close_settings, navigate_settings_tab
+
+from cloud_code_client import (
+    CLOUD_CODE_ENDPOINT,
+    CLOUD_CODE_FALLBACK_ENDPOINT,
+    DEFAULT_USER_AGENT,
+    query_cloud_code_quota_direct,
+    parse_cloud_code_quota_response,
+    monitor_accounts_parallel,
+    save_account_token,
+    get_account_token,
+    load_all_account_tokens
+)
 
 logger = logging.getLogger("QuotaDetector")
 
@@ -268,12 +280,47 @@ async def get_ui_quota_limits(page: Page, known_email: Optional[str] = None) -> 
             
     return limits
 
-async def get_quota_limits(page: Page, known_email: Optional[str] = None) -> Dict[str, Any]:
-    """Gets quota limits preferring direct background query first, falling back to UI scraper."""
-    direct = await get_direct_quota_limits(page, known_email)
-    if direct and (direct.get("weekly_remaining_pct") is not None or direct.get("five_hour_remaining_pct") is not None):
-        return direct
-    return await get_ui_quota_limits(page, known_email)
+def get_decoupled_parallel_quotas(accounts: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Capa 1: Monitoreo desacoplado en paralelo de todas las cuentas configuradas
+    vía Google Cloud Code HTTPS (User-Agent: antigravity/1.11.5 windows/amd64)
+    sin tocar la ventana de Antigravity ni cambiar de cuenta.
+    """
+    return monitor_accounts_parallel(accounts=accounts)
+
+async def get_quota_limits(
+    page: Optional[Page] = None,
+    known_email: Optional[str] = None,
+    access_token: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Gets quota limits using 3-tier resilient hierarchy:
+    Tier 1 (Capa 1 direct HTTPS): If access_token provided, queries Google Cloud Code directly.
+    Tier 2 (React context direct): If page provided, queries React fiber background context (<50ms).
+    Tier 3 (UI / memory fallback): Scrapes Models dialog if page present, or returns token_memory status.
+    """
+    # Tier 1: Direct HTTPS Google Cloud Code
+    if access_token:
+        res = query_cloud_code_quota_direct(access_token=access_token, email=known_email)
+        if res.get("status") == "OK":
+            return res
+
+    # Tier 2: React Fiber direct background reading
+    if page:
+        direct = await get_direct_quota_limits(page, known_email)
+        if direct and (direct.get("weekly_remaining_pct") is not None or direct.get("five_hour_remaining_pct") is not None):
+            return direct
+        return await get_ui_quota_limits(page, known_email)
+
+    # Tier 3: Memory fallback
+    if known_email:
+        try:
+            from token_memory import get_effective_account_status
+            return get_effective_account_status(known_email)
+        except Exception:
+            pass
+
+    return {}
 
 def check_log_quota_errors(lookback_seconds: int = 60) -> Tuple[bool, str]:
     """Tails language_server.log to detect recent quota exhaustion or capacity errors."""
