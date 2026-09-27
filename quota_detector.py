@@ -101,10 +101,12 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
                 
         # Parse Groups from Quota Summary safely
         quota_resp = (data.get("quotaSummary") or {}).get("response") or {}
-        groups = quota_resp.get("groups") or []
+        groups = quota_resp.get("groups") if isinstance(quota_resp, dict) else []
+        if not groups:
+            groups = []
         
-        gemini_group = next((g for g in groups if "Gemini" in g.get("displayName", "")), None)
-        claude_group = next((g for g in groups if "Claude" in g.get("displayName", "") or "GPT" in g.get("displayName", "")), None)
+        gemini_group = next((g for g in groups if isinstance(g, dict) and "gemini" in (g.get("displayName") or "").lower()), None)
+        claude_group = next((g for g in groups if isinstance(g, dict) and any(k in (g.get("displayName") or "").lower() for k in ["claude", "gpt", "other"])), None)
         
         def parse_bucket_group(group):
             res = {
@@ -116,30 +118,50 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
                 "five_hour_reset_time": None,
                 "disabled": False
             }
-            if not group:
+            if not group or not isinstance(group, dict):
                 return res
-            for bucket in group.get("buckets", []):
-                bid = bucket.get("bucketId", "").lower()
-                rem = bucket.get("remaining", {})
-                rem_fraction = rem.get("value") if rem.get("case") == "remainingFraction" else None
+            buckets = group.get("buckets") or []
+            for bucket in buckets:
+                if not bucket or not isinstance(bucket, dict):
+                    continue
+                bid = (bucket.get("bucketId") or "").lower()
+                rem = bucket.get("remaining") or {}
+                rem_fraction = None
+                if isinstance(rem, dict):
+                    rem_fraction = rem.get("value") if rem.get("case") == "remainingFraction" else rem.get("remainingFraction")
+                    if rem_fraction is None and "value" in rem:
+                        rem_fraction = rem.get("value")
+                elif isinstance(rem, (int, float)):
+                    rem_fraction = float(rem)
+
+                if rem_fraction is None and "remainingFraction" in bucket:
+                    rem_fraction = bucket.get("remainingFraction")
+
                 rem_pct = int(round(rem_fraction * 100)) if rem_fraction is not None else None
-                desc = bucket.get("description", "")
-                reset_ts = bucket.get("resetTime", {}).get("seconds")
+                desc = bucket.get("description") or ""
+                reset_ts = bucket.get("resetTime") or {}
+                if isinstance(reset_ts, dict):
+                    reset_sec = reset_ts.get("seconds")
+                elif isinstance(reset_ts, (int, float)):
+                    reset_sec = int(reset_ts)
+                else:
+                    reset_sec = None
+
                 is_disabled = bucket.get("disabled", False)
                 if is_disabled:
                     res["disabled"] = True
                     
-                ref_m = re.search(r'refresh in\s+([^.\n]+)', desc, re.IGNORECASE)
+                ref_m = re.search(r'refresh in\s+([^.\n]+)', desc, re.IGNORECASE) if desc else None
                 ref_text = ref_m.group(1).strip() if ref_m else None
                 
                 if "weekly" in bid:
                     res["weekly_remaining_pct"] = rem_pct
                     res["weekly_refresh_text"] = ref_text
-                    res["weekly_reset_time"] = reset_ts
-                elif "5h" in bid or "five" in bid:
+                    res["weekly_reset_time"] = reset_sec
+                elif "5h" in bid or "five" in bid or "hourly" in bid:
                     res["five_hour_remaining_pct"] = rem_pct
                     res["five_hour_refresh_text"] = ref_text
-                    res["five_hour_reset_time"] = reset_ts
+                    res["five_hour_reset_time"] = reset_sec
             return res
 
         gemini_data = parse_bucket_group(gemini_group)
@@ -147,15 +169,18 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
         
         # Parse Models Quotas safely
         models_data = {}
-        model_configs = ((user_st.get("cascadeModelConfigData") or {}).get("clientModelConfigs")) or []
+        cascade_data = (user_st.get("cascadeModelConfigData") or {}) if isinstance(user_st, dict) else {}
+        model_configs = cascade_data.get("clientModelConfigs") or [] if isinstance(cascade_data, dict) else []
         for m_cfg in model_configs:
+            if not m_cfg or not isinstance(m_cfg, dict):
+                continue
             m_id = m_cfg.get("modelId", "")
             q_info = m_cfg.get("quotaInfo") or {}
-            if m_id and q_info:
+            if m_id and isinstance(q_info, dict):
                 models_data[m_id] = {
                     "label": m_cfg.get("label", m_id),
                     "remaining_fraction": q_info.get("remainingFraction"),
-                    "reset_time": (q_info.get("resetTime") or {}).get("seconds"),
+                    "reset_time": (q_info.get("resetTime") or {}).get("seconds") if isinstance(q_info.get("resetTime"), dict) else q_info.get("resetTime"),
                     "disabled": m_cfg.get("disabled", False)
                 }
                 
@@ -300,8 +325,12 @@ async def get_quota_limits(
     Tier 3 (UI / memory fallback): Scrapes Models dialog if page present, or returns token_memory status.
     """
     # Tier 1: Direct HTTPS Google Cloud Code
-    if access_token:
-        res = query_cloud_code_quota_direct(access_token=access_token, email=known_email)
+    token = access_token
+    if not token and known_email:
+        token = get_account_token(known_email)
+
+    if token:
+        res = query_cloud_code_quota_direct(access_token=token, email=known_email)
         if res.get("status") == "OK":
             return res
 

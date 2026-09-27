@@ -85,9 +85,11 @@ async def ensure_active_page(browser: Browser, current_page: Optional[Page] = No
     raise RuntimeError("No active living page available in Antigravity context.")
 
 async def get_active_conversation_id(page: Page) -> Optional[str]:
-    """Extracts the conversation UUID from current page URL, breadcrumbs, or sidebar."""
-    url = page.url
-    match = re.search(r'/c/([a-f0-9\-]{36})', url)
+    """Extracts the conversation UUID from current page URL, breadcrumbs, sidebar, or persistent memory."""
+    url = getattr(page, "url", "") or ""
+    import urllib.parse
+    decoded_url = urllib.parse.unquote(url)
+    match = re.search(r'/c/([a-f0-9\-]{36})', decoded_url)
     if match:
         return match.group(1)
         
@@ -124,6 +126,16 @@ async def get_active_conversation_id(page: Page) -> Optional[str]:
         }''')
         if cid:
             return cid
+    except Exception:
+        pass
+
+    # Persistent disk fallback
+    try:
+        from token_memory import load_memory
+        mem = load_memory()
+        stored = mem.get("last_active_conversation_id")
+        if stored and re.match(r'^[a-f0-9\-]{36}$', stored):
+            return stored
     except Exception:
         pass
         

@@ -67,6 +67,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
     """
     Parses Google Cloud Code retrieveUserQuotaSummary JSON payload into standardized quota structure.
     Compatible with both direct HTTPS JSON and gRPC-web JSON responses.
+    Defensively handles null/missing fields and malformed structures without raising exceptions.
     """
     if not data or not isinstance(data, dict):
         return {
@@ -81,17 +82,20 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
         }
 
     # Unwrap nested response structures if present
-    quota_resp = data.get("response", data)
+    quota_resp = data.get("response") or data
     if isinstance(quota_resp, dict) and "response" in quota_resp:
-        quota_resp = quota_resp["response"]
+        quota_resp = quota_resp.get("response") or quota_resp
 
-    groups = quota_resp.get("groups", [])
+    if not isinstance(quota_resp, dict):
+        quota_resp = {}
+
+    groups = quota_resp.get("groups") or []
     if not groups and "buckets" in quota_resp:
         # Single bucket list fallback
-        groups = [{"displayName": "Gemini Models", "buckets": quota_resp.get("buckets", [])}]
+        groups = [{"displayName": "Gemini Models", "buckets": quota_resp.get("buckets") or []}]
 
-    gemini_group = next((g for g in groups if "gemini" in g.get("displayName", "").lower()), None)
-    claude_group = next((g for g in groups if any(k in g.get("displayName", "").lower() for k in ["claude", "gpt", "other"])), None)
+    gemini_group = next((g for g in groups if isinstance(g, dict) and "gemini" in (g.get("displayName") or "").lower()), None)
+    claude_group = next((g for g in groups if isinstance(g, dict) and any(k in (g.get("displayName") or "").lower() for k in ["claude", "gpt", "other"])), None)
 
     def parse_bucket_group(group: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         res = {
@@ -103,19 +107,29 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
             "five_hour_reset_time": None,
             "disabled": False
         }
-        if not group:
+        if not group or not isinstance(group, dict):
             return res
 
-        for bucket in group.get("buckets", []):
-            bid = bucket.get("bucketId", "").lower()
-            rem = bucket.get("remaining", {})
-            rem_fraction = rem.get("value") if rem.get("case") == "remainingFraction" else rem.get("remainingFraction")
+        buckets = group.get("buckets") or []
+        for bucket in buckets:
+            if not bucket or not isinstance(bucket, dict):
+                continue
+            bid = (bucket.get("bucketId") or "").lower()
+            rem = bucket.get("remaining") or {}
+            rem_fraction = None
+            if isinstance(rem, dict):
+                rem_fraction = rem.get("value") if rem.get("case") == "remainingFraction" else rem.get("remainingFraction")
+                if rem_fraction is None and "value" in rem:
+                    rem_fraction = rem.get("value")
+            elif isinstance(rem, (int, float)):
+                rem_fraction = float(rem)
+
             if rem_fraction is None and "remainingFraction" in bucket:
-                rem_fraction = bucket["remainingFraction"]
+                rem_fraction = bucket.get("remainingFraction")
 
             rem_pct = int(round(rem_fraction * 100)) if rem_fraction is not None else None
-            desc = bucket.get("description", "")
-            reset_ts = bucket.get("resetTime", {})
+            desc = bucket.get("description") or ""
+            reset_ts = bucket.get("resetTime") or {}
             if isinstance(reset_ts, dict):
                 reset_sec = reset_ts.get("seconds")
             elif isinstance(reset_ts, (int, float)):
@@ -126,7 +140,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
             if bucket.get("disabled", False):
                 res["disabled"] = True
 
-            ref_m = re.search(r'refresh in\s+([^.\n]+)', desc, re.IGNORECASE)
+            ref_m = re.search(r'refresh in\s+([^.\n]+)', desc, re.IGNORECASE) if desc else None
             ref_text = ref_m.group(1).strip() if ref_m else None
 
             if "weekly" in bid:
@@ -143,13 +157,17 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
     gemini_data = parse_bucket_group(gemini_group)
     claude_data = parse_bucket_group(claude_group)
 
-    # Models data
+    # Models data (defensively nested)
     models_data = {}
-    model_configs = (data.get("userStatus", {}).get("cascadeModelConfigData", {}).get("clientModelConfigs", []))
+    user_status = data.get("userStatus") or {}
+    cascade_data = user_status.get("cascadeModelConfigData") or {} if isinstance(user_status, dict) else {}
+    model_configs = cascade_data.get("clientModelConfigs") or [] if isinstance(cascade_data, dict) else []
     for m_cfg in model_configs:
+        if not m_cfg or not isinstance(m_cfg, dict):
+            continue
         m_id = m_cfg.get("modelId", "")
-        q_info = m_cfg.get("quotaInfo", {})
-        if m_id and q_info:
+        q_info = m_cfg.get("quotaInfo") or {}
+        if m_id and isinstance(q_info, dict):
             models_data[m_id] = {
                 "label": m_cfg.get("label", m_id),
                 "remaining_fraction": q_info.get("remainingFraction"),
@@ -176,6 +194,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
         "models": models_data,
         "is_exhausted": is_ex
     }
+
 
 
 def query_cloud_code_quota_direct(

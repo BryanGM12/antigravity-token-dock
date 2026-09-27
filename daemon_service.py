@@ -79,7 +79,8 @@ from account_rotator import (
     determine_target_account,
     is_task_in_progress,
     safe_language_server_guard,
-    rollback_to_functional_session
+    rollback_to_functional_session,
+    is_authenticated_in_dom
 )
 from task_resumer import navigate_to_conversation, resume_conversation_task
 from goal_resumer import resume_with_context, clear_hung_generation
@@ -214,6 +215,12 @@ async def check_status_cli():
             sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
+
+    # Capa 1: Decoupled parallel background quota query for all accounts
+    try:
+        get_decoupled_parallel_quotas()
+    except Exception as e:
+        logger.debug(f"[Capa 1] Sondeo desacoplado inicial falló: {e}")
             
     if is_antigravity_running():
         try:
@@ -227,10 +234,10 @@ async def check_status_cli():
     # Print the formatted memory status table
     print(format_memory_status_table())
 
-async def run_single_switch(target_email: Optional[str] = None):
+async def run_single_switch(target_email: Optional[str] = None, force: bool = False):
     """Executes a single immediate account switch and task resumption without duplicate prompts."""
     target_str = f" to {target_email}" if target_email else ""
-    logger.info(f"Executing immediate manual account switch{target_str}...")
+    logger.info(f"Executing immediate manual account switch{target_str} (force={force})...")
     
     lock = RotationLock(owner=f"manual_switch_{target_email or 'auto'}")
     if not lock.acquire(timeout_sec=12):
@@ -255,7 +262,13 @@ async def run_single_switch(target_email: Optional[str] = None):
             logger.info(f"Saved active conversation ID before switch: {conv_id}")
             
             # Perform rotation (auto_prompt=False to preserve clean chat state on manual switch)
-            success, prev, new_acc = await rotate_account(page, ctx, target_email=target_email, auto_prompt=False, conv_id=conv_id)
+            success, prev, new_acc = await rotate_account(
+                page, ctx,
+                target_email=target_email,
+                auto_prompt=False,
+                conv_id=conv_id,
+                force=force
+            )
             if success:
                 logger.info(f"Account rotation successful: {prev} -> {new_acc}")
                 # Record analytics & send toast

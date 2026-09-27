@@ -41,13 +41,15 @@ except Exception:
         "account4.pro@gmail.com"
     }
 
-async def is_task_in_progress(page: Optional[Page] = None) -> Tuple[bool, str]:
+async def is_task_in_progress(page: Optional[Page] = None, is_exhausted: bool = False) -> Tuple[bool, str]:
     """
     Checks if active AI tasks or response streams are currently in progress in Antigravity.
     Guarantees that active tasks or subagent work are NEVER interrupted by account rotation.
+    If is_exhausted=True, checks whether the stream is stalled/blocked due to quota exhaustion
+    (e.g. language_server has stopped writing data) to avoid deadlock.
     """
     # 1. Chat DOM generation state check
-    if page and not page.is_closed():
+    if page and not getattr(page, "is_closed", lambda: True)():
         try:
             state = await page.evaluate(r'''() => {
                 const buttons = Array.from(document.querySelectorAll('button'));
@@ -59,6 +61,17 @@ async def is_task_in_progress(page: Optional[Page] = None) -> Tuple[bool, str]:
                 return { hasStop };
             }''')
             if state.get("hasStop"):
+                if is_exhausted:
+                    # Check if stream is actually actively writing to language_server.log or stalled
+                    log_file = os.path.expandvars(r"%APPDATA%\Antigravity\logs\language_server.log")
+                    if os.path.exists(log_file):
+                        try:
+                            mtime = os.path.getmtime(log_file)
+                            if (time.time() - mtime) < 2.0:
+                                return True, "Transmisión de respuesta activa en curso antes del corte de cuota"
+                        except Exception:
+                            pass
+                    return False, "Stream detenido por agotamiento de cuota"
                 return True, "Generación activa de respuesta en curso en el chat"
         except Exception:
             pass
@@ -88,20 +101,45 @@ def safe_language_server_guard() -> bool:
     logger.info("[SAFEGUARD] language_server.exe verificado y protegido contra terminación forzada.")
     return True
 
-async def rollback_to_functional_session(page: Page, fallback_email: str) -> bool:
+async def rollback_to_functional_session(page: Optional[Page] = None, fallback_email: Optional[str] = None) -> bool:
     """
     Emergency Rollback Guard:
     If a rotation fails or is aborted and leaves Antigravity in an unauthenticated or
     inconsistent state, immediately rolls back to the known functional account.
     Guarantees Antigravity is NEVER left logged out or hanging on /onboarding.
     """
+    if not fallback_email:
+        try:
+            from config_manager import get_authorized_emails
+            fallback_email = get_authorized_emails()[0]
+        except Exception:
+            fallback_email = "atteelsidas@gmail.com"
+
+    fallback_email = str(fallback_email).strip().lower()
     logger.warning(f"[ROLLBACK GUARD] Ejecutando rollback de emergencia hacia cuenta funcional: {fallback_email}...")
+
+    # If page is missing or closed, handle safely
+    if page is None or (hasattr(page, "is_closed") and page.is_closed()):
+        logger.error("[ROLLBACK] Instancia de Page no proporcionada o cerrada. Imposible operar DOM de Antigravity.")
+        return False
+
     try:
         if await is_authenticated_in_dom(page):
             curr = await get_current_logged_in_email(page, close_after=False)
-            if curr and fallback_email.split("@")[0].lower() in curr.lower():
-                logger.info(f"[ROLLBACK] Sesión ya activa y verificada con {curr}.")
-                return True
+            if curr:
+                curr_lower = curr.lower().strip()
+                try:
+                    from config_manager import get_authorized_emails
+                    valid_auths = [a.lower().strip() for a in get_authorized_emails()]
+                except Exception:
+                    valid_auths = [fallback_email]
+                if fallback_email.split("@")[0].lower() in curr_lower or curr_lower in valid_auths:
+                    logger.info(f"[ROLLBACK] Sesión ya activa y verificada con {curr}.")
+                    return True
+
+        from external_oauth_handler import capture_browser_hwnds, get_default_browser_info, handle_external_google_signin
+        target_proc, _ = get_default_browser_info()
+        pre_hwnds = capture_browser_hwnds(target_proc)
 
         triggered = await wait_for_and_click_sign_in(page, timeout_sec=8)
         if not triggered:
@@ -111,21 +149,20 @@ async def rollback_to_functional_session(page: Page, fallback_email: str) -> boo
         import threading
         auth_evt = threading.Event()
         loop = asyncio.get_running_loop()
-        from external_oauth_handler import handle_external_google_signin, get_default_browser_info
-        target_proc, _ = get_default_browser_info()
 
         recovered = await loop.run_in_executor(
             None,
             lambda: handle_external_google_signin(
                 fallback_email,
-                timeout_sec=25,
+                timeout_sec=30,
+                pre_hwnds=pre_hwnds,
                 target_process=target_proc,
                 auth_event=auth_evt
             )
         )
         auth_evt.set()
 
-        for _ in range(40):
+        for _ in range(50):
             if await is_authenticated_in_dom(page):
                 logger.info(f"[ROLLBACK EXITOSO] Antigravity restaurado a cuenta funcional {fallback_email}.")
                 return True
@@ -422,7 +459,15 @@ async def is_authenticated_in_dom(page: Page) -> bool:
     except Exception:
         return False
 
-async def rotate_account(page: Page, context: Optional[BrowserContext] = None, target_email: Optional[str] = None, auto_prompt: bool = False, conv_id: Optional[str] = None) -> Tuple[bool, str, str]:
+async def rotate_account(
+    page: Page,
+    context: Optional[BrowserContext] = None,
+    target_email: Optional[str] = None,
+    auto_prompt: bool = False,
+    conv_id: Optional[str] = None,
+    force: bool = False,
+    is_exhaustion_switch: bool = False
+) -> Tuple[bool, str, str]:
     """
     Full rotation pipeline:
     1. Detects current active email and captures active conversation ID.
@@ -437,11 +482,19 @@ async def rotate_account(page: Page, context: Optional[BrowserContext] = None, t
     logger.info("Starting automated account rotation...")
 
     # 0. Active Task Safeguard: verify no active AI tasks or generation streams in progress
-    task_busy, busy_desc = await is_task_in_progress(page)
-    if task_busy:
-        logger.warning(f"[SAFEGUARD] Tarea activa en curso detectada ({busy_desc}). Rotación pospuesta para no interrumpir el trabajo de la IA.")
-        current_email = await get_current_logged_in_email(page, close_after=False) or "unknown"
-        return False, current_email, current_email
+    if not force:
+        task_busy, busy_desc = await is_task_in_progress(page, is_exhausted=is_exhaustion_switch)
+        if task_busy:
+            if is_exhaustion_switch:
+                from goal_resumer import clear_hung_generation
+                await clear_hung_generation(page)
+                logger.info("[SAFEGUARD] Stream interrumpido por agotamiento de cuota cancelado limpiamente. Continuando con rotación...")
+            else:
+                logger.warning(f"[SAFEGUARD] Tarea activa en curso detectada ({busy_desc}). Rotación pospuesta para no interrumpir el trabajo de la IA.")
+                current_email = await get_current_logged_in_email(page, close_after=False) or "unknown"
+                return False, current_email, current_email
+    else:
+        logger.info("[FORCE] Rotación forzada autorizada. Omitiendo comprobación de tarea activa.")
 
     # 1. Capture active conversation for resumption later (with persistent disk backup)
     active_conv_id = conv_id or await get_active_conversation_id(page)
