@@ -259,7 +259,7 @@ async def navigate_settings_tab(page: Page, tab_name: str) -> bool:
         
     return False
 
-async def get_current_logged_in_email(page: Page, close_after: bool = True) -> Optional[str]:
+async def get_current_logged_in_email(page: Page, close_after: bool = True, allow_memory_fallback: bool = True) -> Optional[str]:
     """Returns the currently authenticated email, checking React context first, then Account settings."""
     try:
         direct_email = await page.evaluate(r'''async () => {
@@ -299,9 +299,11 @@ async def get_current_logged_in_email(page: Page, close_after: bool = True) -> O
         pass
 
     if not await navigate_settings_tab(page, "Account"):
-        from token_memory import load_memory
-        mem = load_memory()
-        return mem.get("active_account")
+        if allow_memory_fallback:
+            from token_memory import load_memory
+            mem = load_memory()
+            return mem.get("active_account")
+        return None
         
     await asyncio.sleep(0.3)
     email_text = await page.evaluate(r'''() => {
@@ -316,8 +318,10 @@ async def get_current_logged_in_email(page: Page, close_after: bool = True) -> O
         await close_settings(page)
         
     if not email_text:
-        from token_memory import load_memory
-        mem = load_memory()
-        return mem.get("active_account")
+        if allow_memory_fallback:
+            from token_memory import load_memory
+            mem = load_memory()
+            return mem.get("active_account")
+        return None
         
     return email_text.strip().lower()

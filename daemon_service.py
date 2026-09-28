@@ -550,7 +550,7 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                         logger.info(f"Guardando ID de conversacion activa: {conv_id}")
 
                                         # Capa 2 Safeguard: Verify no AI response generation in progress
-                                        task_busy, busy_desc = await is_task_in_progress(page)
+                                        task_busy, busy_desc = await is_task_in_progress(page, is_exhausted=is_exhausted)
                                         if task_busy:
                                             logger.warning(f"[SAFEGUARD] Tarea activa en curso ({busy_desc}). Rotación automática pospuesta para no interrumpir el trabajo de la IA.")
                                             await asyncio.sleep(5.0)
@@ -561,9 +561,15 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                         try:
                                             with RotationLock(owner="daemon_auto_rotation"):
                                                 try:
-                                                    success, prev, new_acc = await rotate_account(page, ctx, target_email=best_target, auto_prompt=True, conv_id=conv_id)
-                                                    last_switch_time = time.time()
+                                                    success, prev, new_acc = await rotate_account(
+                                                        page, ctx,
+                                                        target_email=best_target,
+                                                        auto_prompt=True,
+                                                        conv_id=conv_id,
+                                                        is_exhaustion_switch=True
+                                                    )
                                                     if success:
+                                                        last_switch_time = time.time()
                                                         circuit_breaker.record_success()
                                                         logger.info(f"Cambio de cuenta exitoso: {prev} -> {new_acc}")
                                                         
@@ -578,10 +584,11 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                                             logger.info(f"Verificando conversacion {conv_id} activa...")
                                                             await navigate_to_conversation(page, conv_id)
                                                     else:
+                                                        last_switch_time = time.time() - (COOLDOWN_SECONDS - 25.0)
                                                         circuit_breaker.record_failure("Fallo reportado por rotate_account")
                                                         logger.error("Fallo la rotacion automatica de cuenta.")
                                                 except Exception as rot_exc:
-                                                    last_switch_time = time.time()
+                                                    last_switch_time = time.time() - (COOLDOWN_SECONDS - 25.0)
                                                     circuit_breaker.record_failure(f"Excepción en rotación: {rot_exc}")
                                                     logger.error(f"Excepción en rotación de cuenta: {rot_exc}")
                                         except TimeoutError as te:
@@ -614,6 +621,7 @@ def main():
     parser.add_argument("--status", action="store_true", help="Muestra el reporte de memoria de tokens y cuotas")
     parser.add_argument("--switch-now", action="store_true", help="Ejecuta un cambio inmediato de cuenta manual")
     parser.add_argument("--switch-to", type=str, default=None, help="Ejecuta un cambio inmediato a una cuenta especifica")
+    parser.add_argument("--force", action="store_true", help="Fuerza la ejecución ignorando tareas en curso")
     parser.add_argument("--daemon", action="store_true", help="Ejecuta el servicio de monitoreo en segundo plano")
     parser.add_argument("--interval", type=int, default=15, help="Intervalo de sondeo en segundos (defecto: 15)")
     parser.add_argument("--analytics", action="store_true", help="Muestra el reporte de burn-rate y analiticas")
@@ -625,9 +633,9 @@ def main():
     if args.status:
         asyncio.run(check_status_cli())
     elif args.switch_to:
-        asyncio.run(run_single_switch(target_email=args.switch_to))
+        asyncio.run(run_single_switch(target_email=args.switch_to, force=args.force))
     elif args.switch_now:
-        asyncio.run(run_single_switch())
+        asyncio.run(run_single_switch(force=args.force))
     elif args.daemon:
         asyncio.run(run_daemon_loop(poll_interval_sec=args.interval))
     elif args.analytics:

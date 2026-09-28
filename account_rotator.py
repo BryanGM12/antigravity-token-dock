@@ -585,14 +585,34 @@ async def rotate_account(
                 else:
                     # In RE_SIGN_IN mode, we were already signed in to current_email.
                     # ONLY fire if the session context has flipped to target_email or away from current_email!
-                    live_email = await page.evaluate(r'''() => {
+                    live_email = await page.evaluate(r'''async () => {
                         let core = window.__antigravityCore;
-                        if (!core?.authService) return null;
-                        try {
-                            const st = core.authService.authStateProvider?.getState?.();
-                            if (st?.state === "signedIn") {
-                                return st?.context?.userEmail || null;
+                        if (!core) {
+                            const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                            for (const el of candidates) {
+                                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                                if (!key) continue;
+                                let cur = el[key];
+                                while (cur) {
+                                    if (cur.memoizedProps?.value?.core?.authService) {
+                                        core = cur.memoizedProps.value.core;
+                                        window.__antigravityCore = core;
+                                        break;
+                                    }
+                                    cur = cur.return;
+                                }
+                                if (core) break;
                             }
+                        }
+                        if (core?.authService?._lsClient?.getUserStatus) {
+                            try {
+                                const st = await core.authService._lsClient.getUserStatus({});
+                                if (st?.userStatus?.email) return st.userStatus.email;
+                            } catch (e) {}
+                        }
+                        try {
+                            const ctx = core?.authService?.authStateProvider?.getState?.()?.context;
+                            if (ctx?.userEmail) return ctx.userEmail;
                         } catch (e) {}
                         return null;
                     }''')
@@ -606,7 +626,7 @@ async def rotate_account(
                             break
             except Exception:
                 pass
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(0.05)
 
     poll_task = asyncio.create_task(poll_auth_success())
 
@@ -632,7 +652,7 @@ async def rotate_account(
     authenticated = False
     browser = getattr(getattr(page, "context", None), "browser", None)
 
-    for _ in range(50):
+    for _ in range(60):  # Wait up to 30 seconds for initial signedIn state
         if browser and browser.is_connected():
             try:
                 page = await ensure_active_page(browser, page)
@@ -641,30 +661,41 @@ async def rotate_account(
         if await is_authenticated_in_dom(page):
             authenticated = True
             break
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.5)
         
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.2)
     
-    # 7. Verify new account email (fast polling)
+    # 7. Verify new account email (patient polling up to 35s, with allow_memory_fallback=False)
     new_email = None
-    for _ in range(25):
+    target_prefix = target_email.split("@")[0].lower()
+    current_prefix = current_email.split("@")[0].lower()
+    logger.info(f"Verificando confirmación de nueva cuenta (objetivo: {target_email})...")
+    verify_start = time.time()
+    
+    for verify_round in range(70):  # 70 * 0.5s = 35 seconds max
         if browser and browser.is_connected():
             try:
                 page = await ensure_active_page(browser, page)
             except Exception:
                 pass
         try:
-            new_email = await get_current_logged_in_email(page, close_after=False)
-            if new_email and target_email.split("@")[0].lower() in new_email.lower():
-                break
+            # allow_memory_fallback=False prevents reading old account from disk memory
+            detected = await get_current_logged_in_email(page, close_after=False, allow_memory_fallback=False)
+            if detected:
+                det_lower = detected.lower().strip()
+                if target_prefix in det_lower or (det_lower != current_email.lower() and current_prefix not in det_lower):
+                    new_email = det_lower
+                    elapsed = time.time() - verify_start
+                    logger.info(f"[AUTH-VERIFIED] Nueva cuenta confirmada ({new_email}) en {elapsed:.1f}s.")
+                    break
         except Exception:
             pass
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
         
     await close_settings(page)
     effective_new = new_email or target_email
     
-    rotated_ok = bool(new_email and (target_email.split("@")[0].lower() in new_email.lower() or new_email.lower() != current_email.lower()))
+    rotated_ok = bool(new_email and (target_prefix in new_email.lower() or new_email.lower() != current_email.lower()))
     if rotated_ok:
         logger.info(f"Successfully rotated and verified account: {new_email}!")
     else:

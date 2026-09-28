@@ -3,7 +3,10 @@
 param(
     [Parameter(Position=0)]
     [ValidateSet("start", "stop", "status", "restart", "switch", "activator", "widget", "hud", "analytics", "health", "notify-test", "add", "list", "remove")]
-    [string]$Action = "status"
+    [string]$Action = "status",
+    [Parameter(Position=1)]
+    [string]$Target = "",
+    [switch]$Force
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -230,7 +233,16 @@ switch ($Action.ToLower()) {
         Write-Host "=====================================================" -ForegroundColor Cyan
         Write-Host "     ROTADOR DE CUENTAS DE ANTIGRAVITY (INSTANT)     " -ForegroundColor Cyan
         Write-Host "=====================================================" -ForegroundColor Cyan
-        & python.exe "$ScriptDir\daemon_service.py" --switch-now
+        $argsList = @("$ScriptDir\daemon_service.py")
+        if ($Target) {
+            $argsList += @("--switch-to", $Target)
+        } else {
+            $argsList += "--switch-now"
+        }
+        if ($Force) {
+            $argsList += "--force"
+        }
+        & python.exe $argsList
         Write-Host "`nOperacion finalizada." -ForegroundColor Green
     }
 

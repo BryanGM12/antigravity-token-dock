@@ -264,7 +264,7 @@ class WorkerSwitchAccount(QThread):
 
     def run(self):
         try:
-            cmd = [sys.executable, str(DAEMON_SCRIPT), "--switch-to", self.target_email]
+            cmd = [sys.executable, str(DAEMON_SCRIPT), "--switch-to", self.target_email, "--force"]
             startupinfo = None
             creationflags = 0
             if sys.platform == "win32":

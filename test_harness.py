@@ -487,16 +487,18 @@ async def run_all_tests():
         assert sign_out_blocked is False, "sign_out() destructivo DEBE ser bloqueado por la salvaguarda"
         is_still_auth = await is_authenticated_in_dom(page)
         assert is_still_auth is True, "Antigravity debe permanecer 100% autenticado y operativo"
-        current_acc = await get_current_logged_in_email(page, close_after=False)
-        assert current_acc is not None, "El correo de la sesión activa debe preservarse intacto"
+        current_acc = await get_current_logged_in_email(page, close_after=False, allow_memory_fallback=False)
+        assert current_acc is not None, "El correo de la sesión activa debe detectarse directamente sin envenenamiento de memoria"
         print(f"[PASS] 36. Capa 2: Salvaguarda Total de Tokens verificada: sign_out() destructivo bloqueado, sesión activa={current_acc}.")
 
         # 37. Capa 2: Protección de Tareas Activas y language_server.exe
         task_busy, busy_desc = await is_task_in_progress(page)
         assert isinstance(task_busy, bool), "is_task_in_progress debe devolver un estado booleano"
+        exh_busy, exh_desc = await is_task_in_progress(page, is_exhausted=True)
+        assert isinstance(exh_busy, bool), "is_task_in_progress con is_exhausted debe devolver un estado booleano"
         ls_safe = safe_language_server_guard()
         assert ls_safe is True, "language_server_guard debe reportar language_server.exe vivo y protegido"
-        print(f"[PASS] 37. Capa 2: Protección de Tareas y language_server verificada: Busy={task_busy} ({busy_desc}), LS Protegido={ls_safe}.")
+        print(f"[PASS] 37. Capa 2: Protección de Tareas y language_server verificada: Busy={task_busy} ({busy_desc}), ExhBusy={exh_busy} ({exh_desc}), LS Protegido={ls_safe}.")
 
         # 38. Capa 2: Rollback Inmediato y Garantía Anti-Caídas de Sesión
         rb_ok = await rollback_to_functional_session(page, current_acc)
