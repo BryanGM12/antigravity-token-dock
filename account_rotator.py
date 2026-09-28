@@ -41,13 +41,50 @@ except Exception:
         "account4.pro@gmail.com"
     }
 
+def _emails_match(email_a: Optional[str], email_b: Optional[str]) -> bool:
+    """Exact normalized comparison of two email addresses or their local usernames."""
+    if not email_a or not email_b:
+        return False
+    a = email_a.strip().lower()
+    b = email_b.strip().lower()
+    if a == b:
+        return True
+    user_a = a.split("@")[0].strip()
+    user_b = b.split("@")[0].strip()
+    return bool(user_a and user_a == user_b)
+
+
+def _log_tail_has_quota_error(log_file: str, max_bytes: int = 8192) -> bool:
+    """Checks if the tail of language_server.log contains quota/capacity exhaustion errors."""
+    try:
+        size = os.path.getsize(log_file)
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+            tail = f.read()
+        patterns = (
+            "MODEL_CAPACITY_EXHAUSTED",
+            "RESOURCE_EXHAUSTED",
+            "No capacity available",
+            '"2010"',
+            "Quota exceeded",
+            "rateLimitExceeded"
+        )
+        tail_lower = tail.lower()
+        return any(p.lower() in tail_lower for p in patterns)
+    except Exception:
+        return False
+
+
 async def is_task_in_progress(page: Optional[Page] = None, is_exhausted: bool = False) -> Tuple[bool, str]:
     """
     Checks if active AI tasks or response streams are currently in progress in Antigravity.
     Guarantees that active tasks or subagent work are NEVER interrupted by account rotation.
     If is_exhausted=True, checks whether the stream is stalled/blocked due to quota exhaustion
-    (e.g. language_server has stopped writing data) to avoid deadlock.
+    (e.g. language_server has stopped writing data or is logging quota errors) to avoid deadlock.
     """
+    log_file = os.path.expandvars(r"%APPDATA%\Antigravity\logs\language_server.log")
+
     # 1. Chat DOM generation state check
     if page and not getattr(page, "is_closed", lambda: True)():
         try:
@@ -62,12 +99,11 @@ async def is_task_in_progress(page: Optional[Page] = None, is_exhausted: bool = 
             }''')
             if state.get("hasStop"):
                 if is_exhausted:
-                    # Check if stream is actually actively writing to language_server.log or stalled
-                    log_file = os.path.expandvars(r"%APPDATA%\Antigravity\logs\language_server.log")
-                    if os.path.exists(log_file):
+                    # If the log tail shows quota errors, the stream is deadlocked on quota exhaustion
+                    if os.path.exists(log_file) and not _log_tail_has_quota_error(log_file):
                         try:
                             mtime = os.path.getmtime(log_file)
-                            if (time.time() - mtime) < 2.0:
+                            if (time.time() - mtime) < 1.5:
                                 return True, "Transmisión de respuesta activa en curso antes del corte de cuota"
                         except Exception:
                             pass
@@ -76,12 +112,16 @@ async def is_task_in_progress(page: Optional[Page] = None, is_exhausted: bool = 
         except Exception:
             pass
 
-    # 2. language_server.log write activity check (within last 1.5s)
-    log_file = os.path.expandvars(r"%APPDATA%\Antigravity\logs\language_server.log")
+    # When quota is exhausted and no active generation stop-button is present (or page is None),
+    # do NOT block rotation because language_server.log may be writing quota errors or heartbeats.
+    if is_exhausted:
+        return False, "Idle (quota exhausted)"
+
+    # 2. language_server.log write activity check (within last 1.5s, excluding quota error spam)
     if os.path.exists(log_file):
         try:
             mtime = os.path.getmtime(log_file)
-            if (time.time() - mtime) < 1.5:
+            if (time.time() - mtime) < 1.5 and not _log_tail_has_quota_error(log_file):
                 return True, "Language Server escribiendo activamente transmisiones de datos"
         except Exception:
             pass
@@ -133,7 +173,7 @@ async def rollback_to_functional_session(page: Optional[Page] = None, fallback_e
                     valid_auths = [a.lower().strip() for a in get_authorized_emails()]
                 except Exception:
                     valid_auths = [fallback_email]
-                if fallback_email.split("@")[0].lower() in curr_lower or curr_lower in valid_auths:
+                if _emails_match(fallback_email, curr_lower) or curr_lower in valid_auths:
                     logger.info(f"[ROLLBACK] Sesión ya activa y verificada con {curr}.")
                     return True
 
@@ -336,48 +376,124 @@ async def sign_out(page: Page, force_allow: bool = False) -> bool:
             
     return True
 
-async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
+async def _try_programmatic_login_redirect(page: Page) -> bool:
     """
-    Triggers Google Sign-In with zero-delay programmatic acceleration:
-    1. Primary: Direct invocation of core.authService.loginWithRedirect({ isGcpTos: false }).
-    2. Fallback: Fast UI interaction on /onboarding or Settings dialog.
+    Exhaustively searches the React Fiber tree (upward return chain and downward child/sibling BFS)
+    to locate core.authService and invoke loginWithRedirect({ isGcpTos: false }) without signing out.
     """
-    logger.info("Triggering Google Sign-In flow...")
-
-    # Primary: Fast programmatic trigger
     try:
         triggered = await page.evaluate(r'''async () => {
             let core = window.__antigravityCore;
-            if (!core) {
-                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
-                for (const el of candidates) {
-                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+            const extractCore = (fiber) => {
+                if (!fiber) return null;
+                const c = fiber.memoizedProps?.value?.core || fiber.memoizedProps?.core || fiber.stateNode?.core;
+                if (c?.authService) return c;
+                return null;
+            };
+
+            if (!core || !core.authService) {
+                const primary = document.querySelectorAll(
+                    'div[role="dialog"] *, div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside, button, header'
+                );
+                const nodes = primary.length > 0
+                    ? Array.from(primary).slice(0, 400)
+                    : Array.from(document.querySelectorAll('*')).slice(0, 500);
+
+                for (const el of nodes) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                     if (!key) continue;
                     let cur = el[key];
-                    while (cur) {
-                        if (cur.memoizedProps?.value?.core?.authService) {
-                            core = cur.memoizedProps.value.core;
+                    let depth = 0;
+                    while (cur && depth < 120) {
+                        const found = extractCore(cur);
+                        if (found) {
+                            core = found;
                             window.__antigravityCore = core;
                             break;
                         }
                         cur = cur.return;
+                        depth++;
                     }
-                    if (core) break;
+                    if (core?.authService) break;
                 }
             }
+
+            // Downward BFS from root fiber if upward walk did not find core
+            if (!core || !core.authService) {
+                const roots = document.querySelectorAll('#root, body > div, main');
+                for (const r of roots) {
+                    const key = Object.keys(r).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                    if (!key) continue;
+                    const queue = [r[key]];
+                    const visited = new Set();
+                    let steps = 0;
+                    while (queue.length > 0 && steps < 1500) {
+                        const node = queue.shift();
+                        if (!node || visited.has(node)) continue;
+                        visited.add(node);
+                        steps++;
+                        const found = extractCore(node);
+                        if (found) {
+                            core = found;
+                            window.__antigravityCore = core;
+                            break;
+                        }
+                        if (node.child) queue.push(node.child);
+                        if (node.sibling) queue.push(node.sibling);
+                    }
+                    if (core?.authService) break;
+                }
+            }
+
             if (core?.authService?.loginWithRedirect) {
-                // Trigger OAuth flow asynchronously without awaiting the Promise,
-                // so Python immediately proceeds to handle external browser OAuth.
                 core.authService.loginWithRedirect({ isGcpTos: false }).catch(() => {});
+                return true;
+            }
+            if (typeof core?.authService?.showLoginFlow === 'function') {
+                core.authService.showLoginFlow().catch?.(() => {});
+                return true;
+            }
+            if (typeof core?.authService?.login === 'function') {
+                core.authService.login({ isGcpTos: false }).catch?.(() => {});
+                return true;
+            }
+            if (typeof core?.authService?._lsClient?.loginWithBrowser === 'function') {
+                core.authService._lsClient.loginWithBrowser({ isGcpTos: false }).catch?.(() => {});
                 return true;
             }
             return false;
         }''')
-        if triggered:
-            logger.info("Direct core.authService.loginWithRedirect triggered successfully!")
-            return True
+        return bool(triggered)
     except Exception as e:
         logger.debug(f"Direct programmatic login trigger failed: {e}")
+        return False
+
+
+async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
+    """
+    Triggers Google Sign-In with zero-delay programmatic acceleration:
+    1. Primary: Direct invocation of core.authService.loginWithRedirect({ isGcpTos: false }).
+    2. Secondary: Mount Account Settings dialog to expose authService in Fiber tree and retry loginWithRedirect.
+    3. Fallback: Fast UI interaction on /onboarding or Settings dialog.
+    """
+    logger.info("Triggering Google Sign-In flow...")
+
+    # 1. Primary: Fast programmatic trigger
+    if await _try_programmatic_login_redirect(page):
+        logger.info("Direct core.authService.loginWithRedirect triggered successfully!")
+        return True
+
+    # 2. Secondary: If not on /onboarding, open Account Settings tab briefly so React mounts the Account fiber node
+    if "/onboarding" not in (page.url or ""):
+        try:
+            if await navigate_settings_tab(page, "Account"):
+                await asyncio.sleep(0.25)
+                if await _try_programmatic_login_redirect(page):
+                    logger.info("core.authService.loginWithRedirect triggered after mounting Account Settings tab!")
+                    await close_settings(page)
+                    return True
+        except Exception as e:
+            logger.debug(f"Account tab mount fallback for loginWithRedirect failed: {e}")
 
     # Fallback UI polling
     start = time.time()
@@ -390,6 +506,7 @@ async def wait_for_and_click_sign_in(page: Page, timeout_sec: int = 15) -> bool:
                 logger.info("Found 'Sign In' button in Settings dialog. Clicking...")
                 await settings_sign_in.first.click(force=True)
                 await asyncio.sleep(0.5)
+                return True
             else:
                 # Close settings to uncover onboarding screen
                 await close_settings(page)
@@ -431,18 +548,22 @@ async def is_authenticated_in_dom(page: Page) -> bool:
         state = await page.evaluate(r'''() => {
             let core = window.__antigravityCore;
             if (!core) {
-                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
+                const primary = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside, button, header');
+                const candidates = primary.length > 0 ? Array.from(primary) : Array.from(document.querySelectorAll('*')).slice(0, 300);
                 for (const el of candidates) {
-                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                     if (!key) continue;
                     let cur = el[key];
-                    while (cur) {
-                        if (cur.memoizedProps?.value?.core?.authService) {
-                            core = cur.memoizedProps.value.core;
+                    let depth = 0;
+                    while (cur && depth < 100) {
+                        const c = cur.memoizedProps?.value?.core || cur.memoizedProps?.core || cur.stateNode?.core;
+                        if (c?.authService) {
+                            core = c;
                             window.__antigravityCore = core;
                             break;
                         }
                         cur = cur.return;
+                        depth++;
                     }
                     if (core) break;
                 }
@@ -552,7 +673,7 @@ async def rotate_account(
         # Keeps active session token alive until OAuth completes, preventing
         # "You are not logged into Antigravity" crashes in background subagents.
         logger.info("Attempting seamless in-place re-authentication (RE_SIGN_IN)...")
-        login_triggered = await wait_for_and_click_sign_in(page, timeout_sec=4)
+        login_triggered = await wait_for_and_click_sign_in(page, timeout_sec=5)
 
     if not login_triggered:
         if not is_already_onboarding:
@@ -618,9 +739,7 @@ async def rotate_account(
                     }''')
                     if live_email:
                         live_lower = live_email.lower().strip()
-                        target_prefix = target_email.split("@")[0].lower()
-                        current_prefix = current_email.split("@")[0].lower()
-                        if target_prefix in live_lower or (live_lower != current_email.lower() and current_prefix not in live_lower):
+                        if _emails_match(target_email, live_lower) or not _emails_match(current_email, live_lower):
                             auth_event.set()
                             logger.info(f"[AUTH-SYNC] Cambio a cuenta objetivo ({live_email}) detectado en tiempo real.")
                             break
@@ -667,8 +786,6 @@ async def rotate_account(
     
     # 7. Verify new account email (patient polling up to 35s, with allow_memory_fallback=False)
     new_email = None
-    target_prefix = target_email.split("@")[0].lower()
-    current_prefix = current_email.split("@")[0].lower()
     logger.info(f"Verificando confirmación de nueva cuenta (objetivo: {target_email})...")
     verify_start = time.time()
     
@@ -683,7 +800,7 @@ async def rotate_account(
             detected = await get_current_logged_in_email(page, close_after=False, allow_memory_fallback=False)
             if detected:
                 det_lower = detected.lower().strip()
-                if target_prefix in det_lower or (det_lower != current_email.lower() and current_prefix not in det_lower):
+                if _emails_match(target_email, det_lower) or not _emails_match(current_email, det_lower):
                     new_email = det_lower
                     elapsed = time.time() - verify_start
                     logger.info(f"[AUTH-VERIFIED] Nueva cuenta confirmada ({new_email}) en {elapsed:.1f}s.")
@@ -695,7 +812,7 @@ async def rotate_account(
     await close_settings(page)
     effective_new = new_email or target_email
     
-    rotated_ok = bool(new_email and (target_prefix in new_email.lower() or new_email.lower() != current_email.lower()))
+    rotated_ok = bool(new_email and (_emails_match(target_email, new_email) or not _emails_match(current_email, new_email)))
     if rotated_ok:
         logger.info(f"Successfully rotated and verified account: {new_email}!")
     else:

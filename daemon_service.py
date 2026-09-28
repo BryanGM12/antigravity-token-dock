@@ -117,7 +117,27 @@ from local_hud import start_hud_in_background, HUD_PORT
 from circuit_breaker import RotationCircuitBreaker
 
 COOLDOWN_SECONDS = 300  # 5 minutes minimum between automatic switches to avoid thrashing
+LOCK_STALE_SECONDS = 310  # Must exceed 300s 2FA challenge timeout to prevent dual rotation
 LOCK_FILE = os.path.join(LOG_DIR, "rotation.lock")
+
+
+def _read_lock_file_with_retry(retries: int = 3, delay: float = 0.05) -> Optional[dict]:
+    """Reads LOCK_FILE with short retries to tolerate in-flight writes after O_CREAT|O_EXCL."""
+    for _ in range(retries):
+        if not os.path.exists(LOCK_FILE):
+            return None
+        try:
+            with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        time.sleep(delay)
+    return None
+
 
 class RotationLock:
     def __init__(self, owner: str = "switch"):
@@ -126,48 +146,58 @@ class RotationLock:
 
     def acquire(self, timeout_sec: int = 15) -> bool:
         start = time.time()
+        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
         while time.time() - start < timeout_sec:
             try:
-                if os.path.exists(LOCK_FILE):
-                    try:
-                        with open(LOCK_FILE, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                        lock_pid = data.get("pid")
-                        lock_time = data.get("time", 0)
-                        # Check if stale (> 90s) or process no longer exists
-                        if (time.time() - lock_time > 90) or (lock_pid and not psutil.pid_exists(lock_pid)):
-                            try:
-                                os.remove(LOCK_FILE)
-                            except Exception:
-                                pass
-                        else:
-                            time.sleep(0.5)
-                            continue
-                    except Exception:
+                # Atomic exclusive creation eliminates TOCTOU race between processes
+                fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    payload = {
+                        "owner": self.owner,
+                        "pid": os.getpid(),
+                        "time": time.time()
+                    }
+                    raw_bytes = json.dumps(payload).encode("utf-8")
+                    os.write(fd, raw_bytes)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                self.acquired = True
+                return True
+            except FileExistsError:
+                data = _read_lock_file_with_retry()
+                if data is not None:
+                    lock_pid = data.get("pid")
+                    lock_time = data.get("time", 0)
+                    # Check if stale (> 310s) or process no longer exists
+                    if (time.time() - lock_time > LOCK_STALE_SECONDS) or (lock_pid and not psutil.pid_exists(lock_pid)):
                         try:
                             os.remove(LOCK_FILE)
                         except Exception:
                             pass
-                        
-                payload = {
-                    "owner": self.owner,
-                    "pid": os.getpid(),
-                    "time": time.time()
-                }
-                from atomic_state import SafeJsonStore
-                SafeJsonStore.save_json(LOCK_FILE, payload)
-                self.acquired = True
-                return True
+                        continue
+                    time.sleep(0.3)
+                else:
+                    # Lock file remained unreadable/corrupt after retries: only remove if older than 3s grace period
+                    if not os.path.exists(LOCK_FILE):
+                        continue
+                    try:
+                        age = time.time() - os.path.getmtime(LOCK_FILE)
+                        if age > 3.0:
+                            os.remove(LOCK_FILE)
+                        else:
+                            time.sleep(0.2)
+                    except Exception:
+                        time.sleep(0.2)
             except Exception:
-                time.sleep(0.5)
+                time.sleep(0.3)
         return False
 
     def release(self):
         if os.path.exists(LOCK_FILE):
             try:
-                from atomic_state import SafeJsonStore
-                data = SafeJsonStore.load_json(LOCK_FILE, dict)
-                if data.get("pid") == os.getpid():
+                data = _read_lock_file_with_retry(retries=2, delay=0.02)
+                if data and data.get("pid") == os.getpid():
                     os.remove(LOCK_FILE)
             except Exception:
                 pass
@@ -181,18 +211,18 @@ class RotationLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
 
+
 def is_rotation_locked() -> bool:
     """Checks if another process currently holds the rotation lock."""
     if not os.path.exists(LOCK_FILE):
         return False
     try:
-        from atomic_state import SafeJsonStore
-        data = SafeJsonStore.load_json(LOCK_FILE, dict)
+        data = _read_lock_file_with_retry(retries=3, delay=0.03)
         if not data:
             return False
         lock_pid = data.get("pid")
         lock_time = data.get("time", 0)
-        if time.time() - lock_time > 90:
+        if time.time() - lock_time > LOCK_STALE_SECONDS:
             try:
                 os.remove(LOCK_FILE)
             except Exception:
@@ -497,7 +527,13 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                         mem = load_memory()
                         current_email = mem.get("active_account") or ""
                         pinned = get_pinned_account()
-                        if pinned and pinned.split("@")[0].lower() in current_email.lower():
+                        pinned_match = bool(
+                            pinned and current_email and (
+                                pinned.strip().lower() == current_email.strip().lower() or
+                                pinned.split("@")[0].strip().lower() == current_email.split("@")[0].strip().lower()
+                            )
+                        )
+                        if pinned_match:
                             logger.info(f"[CUENTA FIJADA ⚑] {current_email} está fijada por el usuario. Omitiendo rotación automática.")
                         else:
                             # 1. Cooldown check
@@ -519,11 +555,18 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                                         
                                     if current_email:
                                         try:
-                                            # Sincronizar memoria para marcar inmediatamente la cuenta agotada en 0%
+                                            # Sincronizar memoria diferenciando agotamiento semanal vs 5h
+                                            st_curr = get_effective_account_status(current_email)
+                                            wk_curr = st_curr.get("weekly_remaining_pct")
+                                            fh_curr = st_curr.get("five_hour_remaining_pct")
+                                            wk_exhausted = wk_curr is not None and wk_curr <= 0
+                                            fh_exhausted = fh_curr is None or fh_curr <= 0 or not wk_exhausted
                                             update_account_snapshot(
                                                 current_email,
-                                                five_hour_pct=0,
-                                                five_hour_refresh_text="4h 0m"
+                                                weekly_pct=0 if wk_exhausted else None,
+                                                weekly_refresh_text=(st_curr.get("weekly_recharge_in") or "7d 0h") if wk_exhausted else None,
+                                                five_hour_pct=0 if fh_exhausted else None,
+                                                five_hour_refresh_text="4h 0m" if fh_exhausted else None
                                             )
                                         except Exception as snap_err:
                                             logger.debug(f"Error sincronizando snapshot de cuenta agotada: {snap_err}")
@@ -633,9 +676,11 @@ def main():
     if args.status:
         asyncio.run(check_status_cli())
     elif args.switch_to:
-        asyncio.run(run_single_switch(target_email=args.switch_to, force=args.force))
+        ok = asyncio.run(run_single_switch(target_email=args.switch_to, force=args.force))
+        sys.exit(0 if ok else 1)
     elif args.switch_now:
-        asyncio.run(run_single_switch(force=args.force))
+        ok = asyncio.run(run_single_switch(force=args.force))
+        sys.exit(0 if ok else 1)
     elif args.daemon:
         asyncio.run(run_daemon_loop(poll_interval_sec=args.interval))
     elif args.analytics:

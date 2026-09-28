@@ -110,40 +110,44 @@ switch ($Action.ToLower()) {
             }
         }
 
-        # 2. Start Daemon
-        $existing = Get-DaemonProcess
-        if ($existing) {
-            Write-Host "[!] Daemon ya activo (PID: $($existing.Id))." -ForegroundColor Yellow
-        } else {
-            Write-Host "[+] Iniciando Daemon en segundo plano..." -ForegroundColor Cyan
-            $argsList = @("$ScriptDir\daemon_service.py", "--daemon")
-            $proc = Start-Process -FilePath "pythonw.exe" `
-                -ArgumentList $argsList `
-                -WorkingDirectory $ScriptDir `
-                -WindowStyle Hidden `
-                -PassThru
-            if ($proc) {
-                $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii
-                Start-Sleep -Seconds 1
-                Write-Host "[OK] Daemon iniciado exitosamente (PID: $($proc.Id))." -ForegroundColor Green
+        # 2. Start Daemon & Docked Widget only if Antigravity is currently running
+        #    (otherwise Auto-Activator manages their lifecycle and spawns them when Antigravity opens)
+        if (Test-AntigravityRunning) {
+            $existing = Get-DaemonProcess
+            if ($existing) {
+                Write-Host "[!] Daemon ya activo (PID: $($existing.Id))." -ForegroundColor Yellow
+            } else {
+                Write-Host "[+] Iniciando Daemon en segundo plano..." -ForegroundColor Cyan
+                $argsList = @("$ScriptDir\daemon_service.py", "--daemon")
+                $proc = Start-Process -FilePath "pythonw.exe" `
+                    -ArgumentList $argsList `
+                    -WorkingDirectory $ScriptDir `
+                    -WindowStyle Hidden `
+                    -PassThru
+                if ($proc) {
+                    $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii
+                    Start-Sleep -Seconds 1
+                    Write-Host "[OK] Daemon iniciado exitosamente (PID: $($proc.Id))." -ForegroundColor Green
+                }
             }
-        }
 
-        # 3. Start Docked Widget
-        $wProc = Get-WidgetProcess
-        if ($wProc) {
-            Write-Host "[!] Widget acoplado ya activo (PID: $($wProc.Id))." -ForegroundColor Yellow
-        } else {
-            Write-Host "[+] Iniciando Widget acoplado nativo a Antigravity..." -ForegroundColor Cyan
-            $newW = Start-Process -FilePath "pythonw.exe" `
-                -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
-                -WorkingDirectory $ScriptDir `
-                -WindowStyle Hidden `
-                -PassThru
-            if ($newW) {
-                $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii
-                Write-Host "[OK] Widget acoplado iniciado exitosamente (PID: $($newW.Id))." -ForegroundColor Green
+            $wProc = Get-WidgetProcess
+            if ($wProc) {
+                Write-Host "[!] Widget acoplado ya activo (PID: $($wProc.Id))." -ForegroundColor Yellow
+            } else {
+                Write-Host "[+] Iniciando Widget acoplado nativo a Antigravity..." -ForegroundColor Cyan
+                $newW = Start-Process -FilePath "pythonw.exe" `
+                    -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
+                    -WorkingDirectory $ScriptDir `
+                    -WindowStyle Hidden `
+                    -PassThru
+                if ($newW) {
+                    $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii
+                    Write-Host "[OK] Widget acoplado iniciado exitosamente (PID: $($newW.Id))." -ForegroundColor Green
+                }
             }
+        } else {
+            Write-Host "[i] Antigravity IDE esta cerrado. Auto-Activador iniciara Daemon y Widget automaticamente al abrir Antigravity." -ForegroundColor Yellow
         }
     }
 
@@ -243,7 +247,13 @@ switch ($Action.ToLower()) {
             $argsList += "--force"
         }
         & python.exe $argsList
-        Write-Host "`nOperacion finalizada." -ForegroundColor Green
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            Write-Host "`n[OK] Operacion finalizada exitosamente." -ForegroundColor Green
+        } else {
+            Write-Host "`n[ERROR] La rotacion de cuenta fallo o fue pospuesta (Codigo: $exitCode)." -ForegroundColor Red
+            exit $exitCode
+        }
     }
 
     "restart" {
@@ -269,23 +279,27 @@ switch ($Action.ToLower()) {
             -PassThru
         if ($actP) { $actP.Id | Out-File -FilePath $ActivatorPidFile -Force -Encoding ascii }
 
-        # Start daemon
-        $proc = Start-Process -FilePath "pythonw.exe" `
-            -ArgumentList @("$ScriptDir\daemon_service.py", "--daemon") `
-            -WorkingDirectory $ScriptDir `
-            -WindowStyle Hidden `
-            -PassThru
-        if ($proc) { $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii }
+        if (Test-AntigravityRunning) {
+            # Start daemon
+            $proc = Start-Process -FilePath "pythonw.exe" `
+                -ArgumentList @("$ScriptDir\daemon_service.py", "--daemon") `
+                -WorkingDirectory $ScriptDir `
+                -WindowStyle Hidden `
+                -PassThru
+            if ($proc) { $proc.Id | Out-File -FilePath $PidFile -Force -Encoding ascii }
 
-        # Start widget
-        $newW = Start-Process -FilePath "pythonw.exe" `
-            -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
-            -WorkingDirectory $ScriptDir `
-            -WindowStyle Hidden `
-            -PassThru
-        if ($newW) { $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii }
+            # Start widget
+            $newW = Start-Process -FilePath "pythonw.exe" `
+                -ArgumentList @("$ScriptDir\antigravity_docked_overlay.py") `
+                -WorkingDirectory $ScriptDir `
+                -WindowStyle Hidden `
+                -PassThru
+            if ($newW) { $newW.Id | Out-File -FilePath $WidgetPidFile -Force -Encoding ascii }
 
-        Write-Host "[OK] Auto-Activador, Daemon y Widget reiniciados exitosamente." -ForegroundColor Green
+            Write-Host "[OK] Auto-Activador, Daemon y Widget reiniciados exitosamente." -ForegroundColor Green
+        } else {
+            Write-Host "[OK] Auto-Activador reiniciado (Antigravity cerrado; Daemon y Widget iniciaran al abrir Antigravity)." -ForegroundColor Yellow
+        }
     }
 
     "hud" {

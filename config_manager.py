@@ -83,10 +83,12 @@ def get_account_tab_map() -> Dict[str, int]:
 
 def get_account_index(email: str) -> int:
     """Returns 0-based index of account in configured accounts list."""
-    target = email.lower().strip()
+    target = (email or "").lower().strip()
+    target_user = target.split("@")[0] if "@" in target else target
     for idx, acc in enumerate(load_accounts_config()):
         acc_email = acc.get("email", "").lower().strip()
-        if acc_email in target or target in acc_email:
+        acc_user = acc_email.split("@")[0] if "@" in acc_email else acc_email
+        if acc_email and (acc_email == target or (target_user and acc_user == target_user)):
             return idx
     return 0
 
@@ -257,16 +259,24 @@ def set_windows_startup(enabled: bool) -> bool:
     except Exception as e:
         return False
 
-def export_accounts_backup(dest_path: Path) -> bool:
-    """Exports clean accounts configuration to specified path."""
+def export_accounts_backup(dest_path: Optional[Path] = None) -> Optional[str]:
+    """Exports clean accounts configuration to specified path (or default timestamped backup in STATE_DIR)."""
     try:
+        from datetime import datetime
+        ensure_config_dir()
+        if dest_path is None:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = STATE_DIR / f"accounts_backup_{ts}.json"
+        else:
+            target = Path(dest_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
         accs = get_authorized_accounts()
         clean = [{"email": a["email"], "name": a.get("name", ""), "tier": a.get("tier", "✦ Pro")} for a in accs]
-        with open(dest_path, "w", encoding="utf-8") as f:
+        with open(target, "w", encoding="utf-8") as f:
             json.dump({"accounts": clean, "version": "2.0"}, f, indent=2, ensure_ascii=False)
-        return True
+        return str(target)
     except Exception:
-        return False
+        return None
 
 def import_accounts_backup(src_path: Path) -> int:
     """Imports accounts from a backup file, merging without duplicates. Returns count imported."""

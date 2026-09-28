@@ -78,8 +78,8 @@ async def resume_with_context(page: Page, prompt_override: Optional[str] = None)
     await clear_hung_generation(page)
     await asyncio.sleep(0.5)
     
-    # 2. Check for explicit Retry / Resume button
-    for sel in ['button:has-text("Retry")', 'button:has-text("Reintentar")', 'button:has-text("Continuar")', 'button:has-text("Resume")', 'button:has-text("Proceed")']:
+    # 2. Check for explicit Retry / Resume button (excluding approval buttons like Proceed)
+    for sel in ['button:has-text("Retry")', 'button:has-text("Reintentar")', 'button:has-text("Continuar")', 'button:has-text("Resume")']:
         btn = page.locator(sel)
         if await btn.count() > 0 and await btn.last.is_visible():
             logger.info(f"Found actionable button: '{sel}'. Clicking...")
@@ -98,6 +98,7 @@ async def resume_with_context(page: Page, prompt_override: Optional[str] = None)
         'input[placeholder*="Ask anything"]'
     ]
     
+    typed_ok = False
     for sel in input_selectors:
         box = page.locator(sel)
         if await box.count() > 0 and await box.first.is_visible():
@@ -105,19 +106,21 @@ async def resume_with_context(page: Page, prompt_override: Optional[str] = None)
             await asyncio.sleep(0.2)
             await page.keyboard.type(continuation_text)
             await asyncio.sleep(0.3)
+            typed_ok = True
             await page.keyboard.press("Enter")
             logger.info("Continuation message submitted via Enter key.")
             await asyncio.sleep(1.0)
             return True
             
-    # Fallback: send button click
-    send_btn = page.locator('button[aria-label*="Send"]')
-    if await send_btn.count() > 0 and await send_btn.first.is_visible():
-        await send_btn.first.click()
-        logger.info("Clicked send button.")
-        return True
+    # Fallback: send button click ONLY if text was actually typed
+    if typed_ok:
+        send_btn = page.locator('button[aria-label*="Send"]')
+        if await send_btn.count() > 0 and await send_btn.first.is_visible():
+            await send_btn.first.click()
+            logger.info("Clicked send button.")
+            return True
         
-    logger.warning("Could not submit continuation message.")
+    logger.warning("Could not submit continuation message (no visible chat input found).")
     return False
 
 if __name__ == "__main__":

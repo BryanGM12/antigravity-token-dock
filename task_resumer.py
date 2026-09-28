@@ -170,6 +170,7 @@ async def send_continue_message_input(page: Page, message: str = "continuar") ->
         'input[placeholder*="Ask anything"]'
     ]
     
+    typed_ok = False
     for sel in input_selectors:
         box = page.locator(sel)
         if await box.count() > 0 and await box.first.is_visible():
@@ -177,19 +178,22 @@ async def send_continue_message_input(page: Page, message: str = "continuar") ->
             await asyncio.sleep(0.2)
             await page.keyboard.type(message)
             await asyncio.sleep(0.3)
+            typed_ok = True
             # Press Enter
             await page.keyboard.press("Enter")
             logger.info("Sent continuation message via Enter key.")
             await asyncio.sleep(1.0)
             return True
             
-    # Try finding send button
-    send_btn = page.locator('button[aria-label*="Send"], button:has(svg path[d*="M2.01 21L23 12 2.01 3"])')
-    if await send_btn.count() > 0 and await send_btn.first.is_visible():
-        await send_btn.first.click(force=True)
-        logger.info("Clicked send button.")
-        return True
+    if typed_ok:
+        # Try finding send button only if text was actually typed into an input
+        send_btn = page.locator('button[aria-label*="Send"], button:has(svg path[d*="M2.01 21L23 12 2.01 3"])')
+        if await send_btn.count() > 0 and await send_btn.first.is_visible():
+            await send_btn.first.click(force=True)
+            logger.info("Clicked send button.")
+            return True
         
+    logger.warning("No visible chat message input found; skipping send button click.")
     return False
 
 async def resume_conversation_task(page: Page, conv_id: Optional[str] = None, auto_prompt: bool = False) -> bool:

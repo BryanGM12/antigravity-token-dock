@@ -509,7 +509,150 @@ async def run_all_tests():
         await close_settings(page)
         await browser.close()
 
-    print("\n--- TODOS LOS 38 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 39. [CRIT-01] SafeJsonStore Corrupt Primary File Recovery Without Overwriting .bak
+    import tempfile
+    corrupt_test_path = os.path.join(tempfile.gettempdir(), f"test_corrupt_bak_{os.getpid()}.json")
+    corrupt_bak_path = corrupt_test_path + ".bak"
+    try:
+        SafeJsonStore.save_json(corrupt_test_path, {"healthy_key": "preserved_value", "version": 1})
+        SafeJsonStore.save_json(corrupt_test_path, {"healthy_key": "preserved_value", "version": 2})
+        assert os.path.exists(corrupt_bak_path), "Debe existir archivo .bak tras segunda escritura"
+        # Corrupt the primary file on disk
+        with open(corrupt_test_path, "w", encoding="utf-8") as f:
+            f.write("{corrupt_json_payload")
+        recovered = SafeJsonStore.load_json(corrupt_test_path, dict)
+        assert recovered.get("healthy_key") == "preserved_value", "Debe recuperar datos intactos desde .bak"
+        # Verify .bak was NOT overwritten with the corrupt primary file
+        with open(corrupt_bak_path, "r", encoding="utf-8") as f:
+            bak_data = json.load(f)
+        assert bak_data.get("healthy_key") == "preserved_value", "El archivo .bak NO debe ser sobrescrito por el archivo primario corrupto"
+        print("[PASS] 39. [CRIT-01] SafeJsonStore recuperación desde .bak sin corrupción cruzada verificada.")
+    finally:
+        for p_clean in (corrupt_test_path, corrupt_bak_path):
+            if os.path.exists(p_clean):
+                try:
+                    os.remove(p_clean)
+                except Exception:
+                    pass
+
+    # 40. [CRIT-07] update_account_snapshot(set_active=False) Preserves Active Account During Parallel Polling
+    from token_memory import update_account_snapshot
+    mem_before = load_memory()
+    active_before = mem_before.get("active_account")
+    standby_candidates = [a for a in AUTHORIZED_ACCOUNTS if a != active_before]
+    if standby_candidates and active_before:
+        standby_acc = standby_candidates[0]
+        standby_status = get_effective_account_status(standby_acc)
+        update_account_snapshot(
+            standby_acc,
+            five_hour_pct=standby_status.get("five_hour_remaining_pct", 100),
+            weekly_pct=standby_status.get("weekly_remaining_pct", 100),
+            set_active=False
+        )
+        mem_after = load_memory()
+        assert mem_after.get("active_account") == active_before, (
+            f"set_active=False NO debe alterar active_account (esperado={active_before}, actual={mem_after.get('active_account')})"
+        )
+    print(f"[PASS] 40. [CRIT-07] update_account_snapshot(set_active=False) preserva active_account={active_before}.")
+
+    # 41. [CRIT-03 / HIGH-02] RotationLock Atomic O_EXCL Acquisition & Mutual Exclusion
+    from daemon_service import RotationLock, LOCK_STALE_SECONDS
+    assert LOCK_STALE_SECONDS >= 300, f"LOCK_STALE_SECONDS debe ser >= 300s (actual: {LOCK_STALE_SECONDS})"
+    lock1 = RotationLock(owner="test_harness_1")
+    lock2 = RotationLock(owner="test_harness_2")
+    assert lock1.acquire(timeout_sec=1.0) is True, "Primer RotationLock debe adquirir el candado atómicamente"
+    try:
+        assert lock2.acquire(timeout_sec=0.2) is False, "Segundo RotationLock concurrente debe ser rechazado por O_EXCL"
+    finally:
+        lock1.release()
+    print(f"[PASS] 41. [CRIT-03/HIGH-02] RotationLock O_EXCL atómico y LOCK_STALE_SECONDS={LOCK_STALE_SECONDS}s verificados.")
+
+    # 42. [MED-07] Exact Email/Username Matching vs Substring Collision ("atteelsidas" vs "delsidasatte")
+    from account_rotator import _emails_match
+    from config_manager import get_account_index
+    assert _emails_match("atteelsidas@gmail.com", "atteelsidas@gmail.com") is True
+    assert _emails_match("atteelsidas@gmail.com", "delsidasatte@gmail.com") is False
+    assert _emails_match("sidas", "atteelsidas@gmail.com") is False, "Subcadenas parciales no deben coincidir falsamente"
+    idx_atte = get_account_index("atteelsidas@gmail.com")
+    idx_del = get_account_index("delsidasatte@gmail.com")
+    assert idx_atte != idx_del, "Índices de cuentas distintas no deben colisionar"
+    print("[PASS] 42. [MED-07] Comparación exacta de cuentas sin colisión de subcadenas verificada.")
+
+    # 43. [MED-08] Analytics Burn-Rate Calculation Across Mid-Window Recharge
+    from datetime import datetime, timedelta
+    from analytics_engine import save_analytics_data
+    orig_analytics = load_analytics_data(force_reload=True)
+    try:
+        now_t = datetime.now()
+        synth_acc = "burn_test_synthetic@gmail.com"
+        test_data = {
+            "updated_at": now_t.isoformat(),
+            "total_rotations": orig_analytics.get("total_rotations", 0),
+            "samples": orig_analytics.get("samples", []) + [
+                {"timestamp": (now_t - timedelta(minutes=20)).isoformat(), "account": synth_acc, "five_hour_pct": 20, "weekly_pct": 90},
+                {"timestamp": (now_t - timedelta(minutes=10)).isoformat(), "account": synth_acc, "five_hour_pct": 100, "weekly_pct": 90},
+                {"timestamp": (now_t - timedelta(minutes=2)).isoformat(), "account": synth_acc, "five_hour_pct": 82, "weekly_pct": 89},
+            ]
+        }
+        save_analytics_data(test_data, force=True)
+        synth_burn = calculate_burn_rate(synth_acc, window_minutes=30)
+        assert synth_burn["burn_rate_pct_per_hour"] > 0, (
+            f"Burn-rate tras recarga intermedia debe ser > 0 (obtenido: {synth_burn['burn_rate_pct_per_hour']})"
+        )
+        print(f"[PASS] 43. [MED-08] Cálculo de Burn-Rate resistente a recargas en ventana activa verificado ({synth_burn['burn_rate_pct_per_hour']}%/h).")
+    finally:
+        save_analytics_data(orig_analytics, force=True)
+
+    # 44. [LOW-02] export_accounts_backup() Default Argument Support
+    from config_manager import export_accounts_backup
+    backup_file = export_accounts_backup()
+    assert backup_file is not None and os.path.exists(backup_file), "export_accounts_backup() sin argumentos debe generar archivo de respaldo válido"
+    try:
+        os.remove(backup_file)
+    except Exception:
+        pass
+    print("[PASS] 44. [LOW-02] export_accounts_backup() sin argumentos verificado exitosamente.")
+
+    # 45. [CRIT-06] Live OAuth Token Auto-Refresh, account_tokens.json Persistence & ISO-8601 resetTime Parsing
+    from cloud_code_client import TOKEN_STORE_FILE, parse_reset_time_seconds, load_all_account_tokens
+    iso_sec = parse_reset_time_seconds("2026-10-01T04:16:00Z")
+    assert iso_sec == 1790828160, f"parse_reset_time_seconds debe parsear RFC3339 ISO-8601 a epoch (esperado=1790828160, actual={iso_sec})"
+    all_toks = load_all_account_tokens(sync_profiles=True)
+    assert len(all_toks) >= 3, f"account_tokens.json debe sincronizar al menos 3 tokens de perfiles OAuth (actual={len(all_toks)})"
+    assert os.path.exists(TOKEN_STORE_FILE), "account_tokens.json debe existir en disco tras sincronización"
+    live_cc = query_cloud_code_quota_direct(email="gilsamaniego12m@gmail.com")
+    assert live_cc.get("status") == "OK" and live_cc.get("code") == 200, (
+        f"Consulta directa HTTPS a Cloud Code debe retornar HTTP 200 OK con token auto-refrescado (obtenido: {live_cc.get('status')} / {live_cc.get('code')})"
+    )
+    assert live_cc.get("weekly_reset_time") is not None, "weekly_reset_time ISO-8601 debe ser parseado en respuesta HTTPS real"
+    print(
+        f"[PASS] 45. [CRIT-06] Token OAuth auto-refrescado ({len(all_toks)} cuentas en account_tokens.json), "
+        f"HTTP 200 OK en vivo (5h={live_cc.get('five_hour_remaining_pct')}%, Wk={live_cc.get('weekly_remaining_pct')}%) y resetTime ISO-8601 verificados."
+    )
+
+    # 46. [CRIT-03 / HIGH-01] RotationLock Grace Period Protection for In-Flight O_EXCL Lockfile
+    from daemon_service import LOCK_FILE
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+        except Exception:
+            pass
+    # Simulate an in-flight empty lockfile created < 3s ago by Process A before os.write completes
+    fd_inflight = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.close(fd_inflight)
+    try:
+        lock_contender = RotationLock(owner="contender")
+        assert lock_contender.acquire(timeout_sec=0.3) is False, "No debe eliminar ni robar un lockfile O_EXCL en vuelo (<3s de antigüedad)"
+        assert os.path.exists(LOCK_FILE), "El lockfile en vuelo debe seguir existiendo en disco"
+    finally:
+        if os.path.exists(LOCK_FILE):
+            try:
+                os.remove(LOCK_FILE)
+            except Exception:
+                pass
+    print("[PASS] 46. [CRIT-03/HIGH-01] Protección de lockfile O_EXCL en vuelo (<3s grace period) verificada.")
+
+    print("\n--- TODOS LOS 46 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os

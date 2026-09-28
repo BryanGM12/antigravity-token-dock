@@ -9,6 +9,7 @@ import json
 import logging
 import hashlib
 import copy
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -20,9 +21,22 @@ os.makedirs(STATE_DIR, exist_ok=True)
 
 MAX_HISTORY_SAMPLES = 200
 
+_analytics_lock = threading.RLock()
 _cached_analytics: Optional[Dict[str, Any]] = None
 _cached_analytics_mtime: float = 0.0
 _last_analytics_hash: Optional[str] = None
+
+def _emails_match_analytics(a: Optional[str], b: Optional[str]) -> bool:
+    """Exact normalized email or username equality check."""
+    if not a or not b:
+        return False
+    na = a.strip().lower()
+    nb = b.strip().lower()
+    if na == nb:
+        return True
+    ua = na.split("@")[0] if "@" in na else na
+    ub = nb.split("@")[0] if "@" in nb else nb
+    return bool(ua and ua == ub)
 
 def _compute_analytics_hash(data: Dict[str, Any]) -> str:
     """Computes a lightweight hash of actual analytics payload."""
@@ -45,98 +59,103 @@ def load_analytics_data(force_reload: bool = False) -> Dict[str, Any]:
     """Loads analytics history and cycle stats from disk with mtime caching and corrupt recovery."""
     global _cached_analytics, _cached_analytics_mtime, _last_analytics_hash
 
-    if not force_reload and _cached_analytics is not None and os.path.exists(ANALYTICS_FILE):
-        try:
-            mtime = os.path.getmtime(ANALYTICS_FILE)
-            if mtime == _cached_analytics_mtime:
-                return copy.deepcopy(_cached_analytics)
-        except Exception:
-            pass
+    with _analytics_lock:
+        if not force_reload and _cached_analytics is not None and os.path.exists(ANALYTICS_FILE):
+            try:
+                mtime = os.path.getmtime(ANALYTICS_FILE)
+                if mtime == _cached_analytics_mtime:
+                    return copy.deepcopy(_cached_analytics)
+            except Exception:
+                pass
 
-    from atomic_state import SafeJsonStore
-    data = SafeJsonStore.load_json(ANALYTICS_FILE, _default_analytics_factory)
-    _cached_analytics = copy.deepcopy(data)
-    _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
-    _last_analytics_hash = _compute_analytics_hash(data)
-    return data
+        from atomic_state import SafeJsonStore
+        data = SafeJsonStore.load_json(ANALYTICS_FILE, _default_analytics_factory)
+        _cached_analytics = copy.deepcopy(data)
+        _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
+        _last_analytics_hash = _compute_analytics_hash(data)
+        return data
 
 def save_analytics_data(data: Dict[str, Any], force: bool = False) -> bool:
     """Saves analytics data atomically to disk with dirty-checking hash and Windows retry."""
     global _cached_analytics, _cached_analytics_mtime, _last_analytics_hash
     from atomic_state import SafeJsonStore
 
-    current_hash = _compute_analytics_hash(data)
-    if not force and _last_analytics_hash == current_hash and os.path.exists(ANALYTICS_FILE):
-        _cached_analytics = copy.deepcopy(data)
-        return False
+    with _analytics_lock:
+        current_hash = _compute_analytics_hash(data)
+        if not force and _last_analytics_hash == current_hash and os.path.exists(ANALYTICS_FILE):
+            _cached_analytics = copy.deepcopy(data)
+            return False
 
-    data["updated_at"] = datetime.now().isoformat()
-    SafeJsonStore.save_json(ANALYTICS_FILE, data)
-    _cached_analytics = copy.deepcopy(data)
-    _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
-    _last_analytics_hash = current_hash
-    return True
+        data["updated_at"] = datetime.now().isoformat()
+        SafeJsonStore.save_json(ANALYTICS_FILE, data)
+        _cached_analytics = copy.deepcopy(data)
+        _cached_analytics_mtime = os.path.getmtime(ANALYTICS_FILE) if os.path.exists(ANALYTICS_FILE) else 0.0
+        _last_analytics_hash = current_hash
+        return True
 
 def record_usage_sample(account: str, five_hour_pct: Optional[int], weekly_pct: Optional[int]) -> Dict[str, Any]:
     """Records a new timestamped quota sample for burn-rate calculations."""
     if five_hour_pct is None and weekly_pct is None:
         return {}
         
-    data = load_analytics_data()
-    now_dt = datetime.now()
-    now = now_dt.isoformat()
-    
-    sample = {
-        "timestamp": now,
-        "account": account.strip().lower(),
-        "five_hour_pct": five_hour_pct,
-        "weekly_pct": weekly_pct
-    }
-    
-    # Avoid recording duplicate consecutive samples and unnecessary disk writes if values are identical
-    if data["samples"]:
-        last = data["samples"][-1]
-        if (last["account"] == sample["account"] and 
-            last["five_hour_pct"] == sample["five_hour_pct"] and 
-            last["weekly_pct"] == sample["weekly_pct"]):
-            try:
-                last_dt = datetime.fromisoformat(last["timestamp"])
-                # Throttle disk update on identical readings to at most once per 180 seconds
-                if (now_dt - last_dt).total_seconds() < 180:
-                    return sample
-            except Exception:
-                pass
-            last["timestamp"] = now
-            save_analytics_data(data)
-            return sample
-            
-    data["samples"].append(sample)
-    if len(data["samples"]) > MAX_HISTORY_SAMPLES:
-        data["samples"] = data["samples"][-MAX_HISTORY_SAMPLES:]
+    with _analytics_lock:
+        data = load_analytics_data()
+        now_dt = datetime.now()
+        now = now_dt.isoformat()
         
-    save_analytics_data(data)
-    return sample
+        sample = {
+            "timestamp": now,
+            "account": account.strip().lower(),
+            "five_hour_pct": five_hour_pct,
+            "weekly_pct": weekly_pct
+        }
+        
+        # Avoid recording duplicate consecutive samples and unnecessary disk writes if values are identical
+        if data["samples"]:
+            last = data["samples"][-1]
+            if (_emails_match_analytics(last.get("account"), sample["account"]) and 
+                last.get("five_hour_pct") == sample["five_hour_pct"] and 
+                last.get("weekly_pct") == sample["weekly_pct"]):
+                try:
+                    last_dt = datetime.fromisoformat(last["timestamp"])
+                    # Throttle disk update on identical readings to at most once per 180 seconds
+                    if (now_dt - last_dt).total_seconds() < 180:
+                        return sample
+                except Exception:
+                    pass
+                last["timestamp"] = now
+                save_analytics_data(data)
+                return sample
+                
+        data["samples"].append(sample)
+        if len(data["samples"]) > MAX_HISTORY_SAMPLES:
+            data["samples"] = data["samples"][-MAX_HISTORY_SAMPLES:]
+            
+        save_analytics_data(data)
+        return sample
 
 def record_rotation_event(from_account: str, to_account: str):
     """Increments total rotations counter and records an event entry."""
-    data = load_analytics_data()
-    data["total_rotations"] = data.get("total_rotations", 0) + 1
-    save_analytics_data(data)
+    with _analytics_lock:
+        data = load_analytics_data()
+        data["total_rotations"] = data.get("total_rotations", 0) + 1
+        save_analytics_data(data)
 
 def calculate_burn_rate(account: str, window_minutes: int = 30) -> Dict[str, Any]:
     """
     Calculates the token consumption velocity (% consumed per hour and per minute)
     for a given account over a sliding window.
     """
-    data = load_analytics_data()
-    norm = account.strip().lower()
+    with _analytics_lock:
+        data = load_analytics_data()
+    norm = (account or "").strip().lower()
     now = datetime.now()
     cutoff = now - timedelta(minutes=window_minutes)
     
-    # Filter samples for this account within the window
+    # Filter samples for this account within the window using exact email/username match
     account_samples = []
-    for s in data["samples"]:
-        if norm in s["account"]:
+    for s in data.get("samples", []):
+        if _emails_match_analytics(norm, s.get("account", "")):
             try:
                 t = datetime.fromisoformat(s["timestamp"])
                 if t >= cutoff:
@@ -166,10 +185,23 @@ def calculate_burn_rate(account: str, window_minutes: int = 30) -> Dict[str, Any
             "status": "Intervalo muy corto"
         }
         
-    pct_start = first_s["five_hour_pct"]
-    pct_end = last_s["five_hour_pct"]
-    
-    if pct_start is None or pct_end is None:
+    # Sum positive consumption deltas across consecutive samples so mid-window recharges
+    # (e.g. 20% -> 100% -> 85%) do not zero out the calculated burn rate.
+    pct_consumed = 0
+    prev_val: Optional[int] = None
+    valid_count = 0
+    for _, s in account_samples:
+        curr_val = s.get("five_hour_pct")
+        if curr_val is None:
+            continue
+        valid_count += 1
+        if prev_val is not None and prev_val > curr_val:
+            pct_consumed += (prev_val - curr_val)
+        prev_val = curr_val
+
+    pct_end = last_s.get("five_hour_pct") if last_s.get("five_hour_pct") is not None else prev_val
+
+    if valid_count < 2 or pct_end is None:
         return {
             "account": account,
             "burn_rate_pct_per_hour": 0.0,
@@ -178,8 +210,6 @@ def calculate_burn_rate(account: str, window_minutes: int = 30) -> Dict[str, Any
             "status": "Valores indeterminados"
         }
         
-    # Consumption is decrease in percentage
-    pct_consumed = max(0, pct_start - pct_end)
     hours = time_diff_sec / 3600.0
     burn_per_hour = round(pct_consumed / hours, 1) if hours > 0 else 0.0
     burn_per_min = round(burn_per_hour / 60.0, 3)

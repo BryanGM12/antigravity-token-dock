@@ -94,6 +94,9 @@ try {
 
     if ($items.Count -eq 0) {
         Write-Output "[]"
+    } elseif ($items.Count -eq 1) {
+        $json = $items[0] | ConvertTo-Json -Compress
+        Write-Output "[$json]"
     } else {
         $json = $items | ConvertTo-Json -Compress
         Write-Output $json

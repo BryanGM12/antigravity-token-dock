@@ -390,7 +390,9 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
         grid.innerHTML = '';
         
         for (const [email, acc] of Object.entries(data.accounts || {})) {
-          const isActive = (email === data.active_account);
+          const normE = (email || '').trim().toLowerCase();
+          const normA = (data.active_account || '').trim().toLowerCase();
+          const isActive = Boolean(normE && normA && (normE === normA || normE.split('@')[0] === normA.split('@')[0]));
           const gem = acc.gemini || {};
           const cgpt = acc.claude_gpt || {};
           
@@ -619,10 +621,17 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 def start_hud_server(port: int = HUD_PORT):
-    """Starts the multi-threaded HUD server on localhost."""
-    server = ReusableThreadingHTTPServer(("127.0.0.1", port), HUDRequestHandler)
+    """Starts the multi-threaded HUD server on localhost, handling port-in-use gracefully."""
+    try:
+        server = ReusableThreadingHTTPServer(("127.0.0.1", port), HUDRequestHandler)
+    except OSError as e:
+        logger.warning(f"Local HUD port {port} is already in use or unavailable ({e}); skipping duplicate HUD bind.")
+        return
     logger.info(f"Local HUD server running at http://127.0.0.1:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except Exception as e:
+        logger.debug(f"Local HUD server stopped: {e}")
 
 def start_hud_in_background(port: int = HUD_PORT):
     """Starts HUD server inside a daemon background thread."""

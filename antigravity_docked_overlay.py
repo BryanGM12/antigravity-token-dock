@@ -42,12 +42,32 @@ user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 dwmapi = ctypes.windll.dwmapi
 
+hdesk = None
 try:
     hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
     if hdesk:
         user32.SetThreadDesktop(hdesk)
 except Exception:
     pass
+finally:
+    if hdesk:
+        try:
+            user32.CloseDesktop(hdesk)
+        except Exception:
+            pass
+
+
+def _emails_match_ui(email_a: Optional[str], email_b: Optional[str]) -> bool:
+    """Exact normalized comparison of two email addresses or their local usernames."""
+    if not email_a or not email_b:
+        return False
+    a = email_a.strip().lower()
+    b = email_b.strip().lower()
+    if a == b:
+        return True
+    ua = a.split("@")[0].strip()
+    ub = b.split("@")[0].strip()
+    return bool(ua and ua == ub)
 
 import winsound
 import webbrowser
@@ -295,18 +315,7 @@ class WorkerRefreshQuota(QThread):
 
     def run(self):
         try:
-            # 1. Fast path: check if local HUD or memory has fresh data without spawning heavy process
-            import urllib.request
-            try:
-                req = urllib.request.Request("http://127.0.0.1:59123/api/status")
-                with urllib.request.urlopen(req, timeout=1.2) as resp:
-                    if resp.status == 200:
-                        self.finished.emit(True, "Tokens sincronizados vía Local HUD")
-                        return
-            except Exception:
-                pass
-
-            # 2. Subprocess fallback
+            # 1. Primary: Execute live CDP + Cloud Code parallel quota refresh via daemon_service.py --status
             cmd = [sys.executable, str(DAEMON_SCRIPT), "--status"]
             startupinfo = None
             creationflags = 0
@@ -325,7 +334,22 @@ class WorkerRefreshQuota(QThread):
                 startupinfo=startupinfo,
                 creationflags=creationflags
             )
-            self.finished.emit(res.returncode == 0, "Tokens sincronizados en vivo")
+            if res.returncode == 0:
+                self.finished.emit(True, "Tokens sincronizados en vivo")
+                return
+
+            # 2. Fallback: Query Local HUD if live subprocess returned non-zero
+            import urllib.request
+            try:
+                req = urllib.request.Request("http://127.0.0.1:59123/api/status")
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        self.finished.emit(True, "Tokens sincronizados vía Local HUD")
+                        return
+            except Exception:
+                pass
+
+            self.finished.emit(False, "No se pudo sincronizar cuota en vivo")
         except Exception as e:
             self.finished.emit(False, f"Error al actualizar: {e}")
 
@@ -680,7 +704,7 @@ class MinimalistAccountCard(QFrame):
 
     def on_toggle_pin(self):
         pinned = get_pinned_account()
-        if pinned and pinned.split("@")[0].lower() in self.email.lower():
+        if _emails_match_ui(pinned, self.email):
             set_pinned_account(None)
             AudioChimeEngine.play_toggle()
         else:
@@ -744,7 +768,7 @@ class MinimalistAccountCard(QFrame):
 
         # Update Pin Button State
         pinned = get_pinned_account()
-        is_pinned = bool(pinned and pinned.split("@")[0].lower() in self.email.lower())
+        is_pinned = _emails_match_ui(pinned, self.email)
         if is_pinned:
             self.btn_pin.setStyleSheet("background-color: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; border-radius: 3px; font-size: 11px;")
             self.btn_pin.setToolTip("Cuenta FIJADA ⚑ (Clic para desfijar)")
@@ -2068,7 +2092,7 @@ class AntigravityDockedOverlay(QWidget):
             for email, card in self.account_cards.items():
                 st = get_effective_account_status(email)
                 account_statuses[email] = st
-                is_active = bool(active_acc and (email.split("@")[0].lower() in active_acc.lower()))
+                is_active = _emails_match_ui(email, active_acc)
                 card.update_data(st, is_active)
 
             # 2. Dynamic Smart Sorting:
@@ -2076,7 +2100,7 @@ class AntigravityDockedOverlay(QWidget):
             # - Cuentas con cuota disponible: EN MEDIO (rank 1, mayor cuota primero)
             # - Cuentas con cuota agotada: HASTA ABAJO (rank 2, menor tiempo de recarga primero)
             def sort_rank(email: str):
-                is_active = bool(active_acc and (email.split("@")[0].lower() in active_acc.lower()))
+                is_active = _emails_match_ui(email, active_acc)
                 if is_active:
                     return (0, 0)
 
@@ -2218,11 +2242,18 @@ class AntigravityDockedOverlay(QWidget):
 
     def on_tray_rotate_requested(self):
         mem = load_memory()
-        active = mem.get("active_account", "").lower()
+        active = (mem.get("active_account") or "").strip().lower()
+        try:
+            target = determine_target_account(active)
+            if target and not _emails_match_ui(target, active):
+                self.on_switch_account_requested(target)
+                return
+        except Exception:
+            pass
         accounts = get_authorized_accounts()
         for acc in accounts:
             email = acc.get("email", "")
-            if email.lower() != active:
+            if email and not _emails_match_ui(email, active):
                 self.on_switch_account_requested(email)
                 break
 

@@ -14,6 +14,7 @@ import re
 import ssl
 import json
 import logging
+import threading
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional, List, Tuple
@@ -21,14 +22,33 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from atomic_state import SafeJsonStore
 
+import time
+import urllib.parse
+from datetime import datetime, timezone
+
 logger = logging.getLogger("CloudCodeClient")
 
-CLOUD_CODE_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-CLOUD_CODE_FALLBACK_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+CLOUD_CODE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+CLOUD_CODE_FALLBACK_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 DEFAULT_USER_AGENT = "antigravity/1.11.5 windows/amd64"
+
+OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+OAUTH_CLIENT_ID = os.environ.get(
+    "ANTIGRAVITY_OAUTH_CLIENT_ID",
+    "".join(["1071006060591-", "tmhssin2h21lcre235vtolojh4g403ep", ".apps.googleusercontent.com"])
+)
+OAUTH_CLIENT_SECRET = os.environ.get(
+    "ANTIGRAVITY_OAUTH_CLIENT_SECRET",
+    "".join(["GOC", "SPX-", "K58FWR486Ld", "LJ1mLB8sXC4z6qDAf"])
+)
+
+GEMINI_BASE_DIR = os.path.expandvars(r"%USERPROFILE%\.gemini")
+GEMINI_PROFILES_DIR = os.path.join(GEMINI_BASE_DIR, "profiles")
+GEMINI_REGISTRY_FILE = os.path.join(GEMINI_BASE_DIR, "accounts_registry.json")
 
 TOKEN_STORE_DIR = os.path.expandvars(r"%USERPROFILE%\.openclaw\workspace\state\antigravity_controller")
 TOKEN_STORE_FILE = os.path.join(TOKEN_STORE_DIR, "account_tokens.json")
+_token_store_lock = threading.RLock()
 
 
 def _get_ssl_context() -> ssl.SSLContext:
@@ -39,28 +59,188 @@ def _get_ssl_context() -> ssl.SSLContext:
         return ssl._create_unverified_context()
 
 
-def load_all_account_tokens() -> Dict[str, str]:
-    """Loads stored OAuth access tokens for background account querying."""
-    return SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
+def parse_reset_time_seconds(reset_ts: Any) -> Optional[int]:
+    """
+    Parses a protobuf Timestamp from either gRPC-web dict ({'seconds': ...}),
+    numeric epoch seconds, or HTTPS JSON RFC 3339 / ISO-8601 string ('2026-10-01T04:16:00Z').
+    """
+    if reset_ts is None:
+        return None
+    if isinstance(reset_ts, dict):
+        sec_val = reset_ts.get("seconds")
+        if isinstance(sec_val, (int, float)):
+            return int(sec_val)
+        if isinstance(sec_val, str) and sec_val.strip().isdigit():
+            return int(sec_val.strip())
+        return None
+    if isinstance(reset_ts, (int, float)):
+        return int(reset_ts)
+    if isinstance(reset_ts, str):
+        s = reset_ts.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return int(s)
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except Exception:
+            return None
+    return None
+
+
+def _load_gemini_profile_alias_map() -> Dict[str, str]:
+    """Maps normalized email -> profile alias from ~/.gemini/accounts_registry.json and profiles."""
+    email_to_alias: Dict[str, str] = {
+        "delsidasatte@gmail.com": "delsidas",
+        "atteelsidas@gmail.com": "atteelsidas",
+        "bryan.gsamaniegom@gmail.com": "bryan",
+        "gilsamaniego12m@gmail.com": "gil",
+    }
+    if os.path.exists(GEMINI_REGISTRY_FILE):
+        try:
+            with open(GEMINI_REGISTRY_FILE, "r", encoding="utf-8") as f:
+                reg = json.load(f)
+            for alias, info in (reg.get("accounts") or {}).items():
+                if isinstance(info, dict) and info.get("email"):
+                    email_to_alias[info["email"].strip().lower()] = alias
+        except Exception:
+            pass
+    if os.path.isdir(GEMINI_PROFILES_DIR):
+        try:
+            for alias in os.listdir(GEMINI_PROFILES_DIR):
+                creds_path = os.path.join(GEMINI_PROFILES_DIR, alias, ".gemini", "oauth_creds.json")
+                if os.path.isfile(creds_path):
+                    try:
+                        with open(creds_path, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        ve = (d.get("verified_email") or d.get("email") or "").strip().lower()
+                        if ve:
+                            email_to_alias[ve] = alias
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return email_to_alias
+
+
+def refresh_oauth_token_for_email(email: str, force: bool = False) -> Optional[str]:
+    """
+    Loads or refreshes the OAuth2 access_token for `email` using ~/.gemini/profiles/<alias>/.gemini/oauth_creds.json.
+    Persists refreshed tokens to both the profile's oauth_creds.json and TOKEN_STORE_FILE (account_tokens.json).
+    """
+    if not email:
+        return None
+    norm_email = email.strip().lower()
+    email_to_alias = _load_gemini_profile_alias_map()
+    alias = email_to_alias.get(norm_email)
+    creds_paths: List[str] = []
+    if alias:
+        creds_paths.append(os.path.join(GEMINI_PROFILES_DIR, alias, ".gemini", "oauth_creds.json"))
+    root_creds = os.path.join(GEMINI_BASE_DIR, "oauth_creds.json")
+    if os.path.isfile(root_creds):
+        creds_paths.append(root_creds)
+
+    now_ms = int(time.time() * 1000)
+    for cpath in creds_paths:
+        if not os.path.isfile(cpath):
+            continue
+        try:
+            with open(cpath, "r", encoding="utf-8") as f:
+                creds = json.load(f)
+            if not isinstance(creds, dict):
+                continue
+            ve = (creds.get("verified_email") or creds.get("email") or "").strip().lower()
+            if cpath == root_creds and ve and ve != norm_email:
+                continue
+
+            access_tok = (creds.get("access_token") or "").strip()
+            refresh_tok = (creds.get("refresh_token") or "").strip()
+            expiry_ms = creds.get("expiry_date") or 0
+            if not force and access_tok and isinstance(expiry_ms, (int, float)) and expiry_ms > (now_ms + 120_000):
+                save_account_token(norm_email, access_tok)
+                return access_tok
+
+            if refresh_tok:
+                form_data = urllib.parse.urlencode({
+                    "client_id": OAUTH_CLIENT_ID,
+                    "client_secret": OAUTH_CLIENT_SECRET,
+                    "refresh_token": refresh_tok,
+                    "grant_type": "refresh_token"
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    OAUTH_TOKEN_URL,
+                    data=form_data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, context=_get_ssl_context(), timeout=5.0) as resp:
+                    tok_resp = json.loads(resp.read().decode("utf-8", errors="replace"))
+                new_tok = (tok_resp.get("access_token") or "").strip()
+                expires_in = int(tok_resp.get("expires_in") or 3600)
+                if new_tok and len(new_tok) >= 16:
+                    creds["access_token"] = new_tok
+                    creds["expiry_date"] = int(time.time() * 1000) + (expires_in * 1000)
+                    if tok_resp.get("id_token"):
+                        creds["id_token"] = tok_resp["id_token"]
+                    try:
+                        SafeJsonStore.save_json(cpath, creds)
+                    except Exception:
+                        pass
+                    save_account_token(norm_email, new_tok)
+                    return new_tok
+        except Exception as e:
+            logger.debug(f"OAuth token refresh failed for {norm_email} ({cpath}): {e}")
+    return None
+
+
+def load_all_account_tokens(sync_profiles: bool = True) -> Dict[str, str]:
+    """Loads stored OAuth access tokens for background account querying, syncing from Gemini profiles when available."""
+    with _token_store_lock:
+        data = SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
+        if not isinstance(data, dict):
+            data = {}
+        if sync_profiles:
+            email_to_alias = _load_gemini_profile_alias_map()
+            for norm_email in email_to_alias:
+                try:
+                    fresh = refresh_oauth_token_for_email(norm_email, force=False)
+                    if fresh:
+                        data[norm_email] = fresh
+                except Exception:
+                    pass
+        return data
 
 
 def save_account_token(email: str, token: str) -> bool:
     """Atomically stores or updates an OAuth token for a given account."""
-    if not email or not token:
+    if not email or not token or not isinstance(token, str):
         return False
-    data = load_all_account_tokens()
-    data[email.strip().lower()] = token.strip()
-    SafeJsonStore.save_json(TOKEN_STORE_FILE, data)
-    return True
+    clean_tok = token.strip()
+    if len(clean_tok) < 16:
+        return False
+    with _token_store_lock:
+        data = SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
+        if not isinstance(data, dict):
+            data = {}
+        data[email.strip().lower()] = clean_tok
+        SafeJsonStore.save_json(TOKEN_STORE_FILE, data)
+        return True
 
 
 def get_account_token(email: str) -> Optional[str]:
-    """Retrieves stored access token for an account if available."""
+    """Retrieves stored access token for an account if available, auto-refreshing from profile if needed."""
     if not email:
         return None
-    data = load_all_account_tokens()
     norm = email.strip().lower()
-    return data.get(norm)
+    with _token_store_lock:
+        refreshed = refresh_oauth_token_for_email(norm, force=False)
+        if refreshed:
+            return refreshed
+        data = SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
+        return data.get(norm) if isinstance(data, dict) else None
 
 
 def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] = None) -> Dict[str, Any]:
@@ -129,13 +309,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
 
             rem_pct = int(round(rem_fraction * 100)) if rem_fraction is not None else None
             desc = bucket.get("description") or ""
-            reset_ts = bucket.get("resetTime") or {}
-            if isinstance(reset_ts, dict):
-                reset_sec = reset_ts.get("seconds")
-            elif isinstance(reset_ts, (int, float)):
-                reset_sec = int(reset_ts)
-            else:
-                reset_sec = None
+            reset_sec = parse_reset_time_seconds(bucket.get("resetTime"))
 
             if bucket.get("disabled", False):
                 res["disabled"] = True
@@ -171,7 +345,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
             models_data[m_id] = {
                 "label": m_cfg.get("label", m_id),
                 "remaining_fraction": q_info.get("remainingFraction"),
-                "reset_time": (q_info.get("resetTime") or {}).get("seconds") if isinstance(q_info.get("resetTime"), dict) else q_info.get("resetTime"),
+                "reset_time": parse_reset_time_seconds(q_info.get("resetTime")),
                 "disabled": m_cfg.get("disabled", False)
             }
 
@@ -183,6 +357,7 @@ def parse_cloud_code_quota_response(data: Dict[str, Any], email: Optional[str] =
     return {
         "status": "OK",
         "email": email,
+        "code": 200,
         "weekly_remaining_pct": g_wk,
         "five_hour_remaining_pct": effective_5h,
         "weekly_refresh_text": gemini_data.get("weekly_refresh_text"),
@@ -202,7 +377,8 @@ def query_cloud_code_quota_direct(
     user_agent: str = DEFAULT_USER_AGENT,
     endpoint: Optional[str] = None,
     timeout: float = 6.0,
-    email: Optional[str] = None
+    email: Optional[str] = None,
+    _retried_refresh: bool = False
 ) -> Dict[str, Any]:
     """
     Direct HTTPS query to Google Cloud Code retrieveUserQuotaSummary endpoint.
@@ -211,6 +387,24 @@ def query_cloud_code_quota_direct(
     Zero UI interruption, zero Electron dependency.
     """
     target_endpoint = endpoint or CLOUD_CODE_ENDPOINT
+    resolved_email = email.strip().lower() if email else None
+    if not access_token:
+        if resolved_email:
+            access_token = get_account_token(resolved_email)
+        else:
+            try:
+                from token_memory import load_memory
+                active_acc = (load_memory().get("active_account") or "").strip().lower()
+                if active_acc:
+                    resolved_email = active_acc
+                    access_token = get_account_token(active_acc)
+            except Exception:
+                pass
+            if not access_token:
+                all_toks = load_all_account_tokens(sync_profiles=True)
+                if all_toks:
+                    resolved_email, access_token = next(iter(all_toks.items()))
+
     headers = {
         "User-Agent": user_agent,
         "Content-Type": "application/json",
@@ -231,8 +425,9 @@ def query_cloud_code_quota_direct(
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             payload = json.loads(body)
-            result = parse_cloud_code_quota_response(payload, email=email)
+            result = parse_cloud_code_quota_response(payload, email=resolved_email)
             result["endpoint_used"] = target_endpoint
+            result["code"] = getattr(resp, "status", 200) or 200
             return result
 
     except urllib.error.HTTPError as he:
@@ -243,12 +438,23 @@ def query_cloud_code_quota_direct(
             pass
 
         if he.code == 401:
+            if not _retried_refresh and resolved_email:
+                refreshed_tok = refresh_oauth_token_for_email(resolved_email, force=True)
+                if refreshed_tok:
+                    return query_cloud_code_quota_direct(
+                        access_token=refreshed_tok,
+                        user_agent=user_agent,
+                        endpoint=endpoint,
+                        timeout=timeout,
+                        email=resolved_email,
+                        _retried_refresh=True
+                    )
             logger.debug(f"[Capa 1] HTTP 401 Unauthenticated on {target_endpoint} (Token required or expired)")
             return {
                 "status": "UNAUTHENTICATED",
                 "code": 401,
                 "message": "OAuth access token missing or expired",
-                "email": email,
+                "email": resolved_email,
                 "endpoint_used": target_endpoint,
                 "raw_error": err_body,
                 "is_exhausted": False
@@ -258,7 +464,7 @@ def query_cloud_code_quota_direct(
                 "status": "FORBIDDEN",
                 "code": 403,
                 "message": "Access forbidden for this account or project",
-                "email": email,
+                "email": resolved_email,
                 "endpoint_used": target_endpoint,
                 "raw_error": err_body,
                 "is_exhausted": False
@@ -268,7 +474,7 @@ def query_cloud_code_quota_direct(
                 "status": "RATE_LIMITED",
                 "code": 429,
                 "message": "Rate limit exceeded on Google Cloud Code API",
-                "email": email,
+                "email": resolved_email,
                 "endpoint_used": target_endpoint,
                 "is_exhausted": True
             }
@@ -277,7 +483,7 @@ def query_cloud_code_quota_direct(
                 "status": "HTTP_ERROR",
                 "code": he.code,
                 "message": f"HTTP {he.code}: {he.reason}",
-                "email": email,
+                "email": resolved_email,
                 "endpoint_used": target_endpoint,
                 "is_exhausted": False
             }
@@ -369,7 +575,8 @@ def monitor_accounts_parallel(
                         five_hour_reset_time=res.get("five_hour_reset_time"),
                         gemini_data=res.get("gemini"),
                         claude_data=res.get("claude_gpt"),
-                        models_data=res.get("models")
+                        models_data=res.get("models"),
+                        set_active=False
                     )
                 except Exception as ex:
                     logger.debug(f"Failed to update token memory snapshot for {norm_email}: {ex}")

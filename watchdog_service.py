@@ -57,12 +57,19 @@ def is_language_server_alive() -> bool:
 
 def switch_to_interactive_desktop() -> bool:
     """Ensures thread is bound to 'default' desktop for window operations."""
+    h_desk = None
     try:
         h_desk = user32.OpenDesktopW('default', 0, False, 0x01FF)
         if h_desk:
             return bool(user32.SetThreadDesktop(h_desk))
     except Exception:
         pass
+    finally:
+        if h_desk:
+            try:
+                user32.CloseDesktop(h_desk)
+            except Exception:
+                pass
     return False
 
 def is_auth_success_window(title: str) -> bool:
@@ -122,14 +129,14 @@ def cleanup_orphan_comet_auth_tabs() -> int:
     switch_to_interactive_desktop()
     closed_count = 0
 
-    # Never close auth tabs if a rotation is actively in progress
+    # Never close auth tabs if a rotation is actively in progress (310s window covers 300s 2FA challenges)
     lock_file = os.path.expandvars(r"%USERPROFILE%\.openclaw\workspace\state\antigravity_controller\rotation.lock")
     if os.path.exists(lock_file):
         try:
             with open(lock_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             lock_time = data.get("time", 0)
-            if (time.time() - lock_time) < 90:
+            if (time.time() - lock_time) < 310:
                 logger.debug("[Watchdog] Rotación activa detectada en lockfile. Omitiendo limpieza de pestañas.")
                 return 0
         except Exception:

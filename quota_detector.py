@@ -19,6 +19,7 @@ from cloud_code_client import (
     DEFAULT_USER_AGENT,
     query_cloud_code_quota_direct,
     parse_cloud_code_quota_response,
+    parse_reset_time_seconds,
     monitor_accounts_parallel,
     save_account_token,
     get_account_token,
@@ -40,18 +41,22 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
         data = await page.evaluate(r'''async () => {
             let core = window.__antigravityCore;
             if (!core) {
-                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
-                for (const el of candidates) {
-                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                const primary = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside, button, header');
+                const allNodes = primary.length > 0 ? Array.from(primary) : Array.from(document.querySelectorAll('*')).slice(0, 300);
+                for (const el of allNodes) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                     if (!key) continue;
                     let cur = el[key];
-                    while (cur) {
-                        if (cur.memoizedProps?.value?.core) {
-                            core = cur.memoizedProps.value.core;
+                    let depth = 0;
+                    while (cur && depth < 100) {
+                        const candidate = cur.memoizedProps?.value?.core || cur.memoizedProps?.core || cur.stateNode?.core;
+                        if (candidate && (candidate.authService || candidate.cloudCodeService)) {
+                            core = candidate;
                             window.__antigravityCore = core;
                             break;
                         }
                         cur = cur.return;
+                        depth++;
                     }
                     if (core) break;
                 }
@@ -75,10 +80,52 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
                     userStatus = { error: String(e) };
                 }
             }
+
+            // Attempt to extract live OAuth access token from authService / cloudCodeService / userStatus
+            let oauthToken = null;
+            try {
+                const auth = core.authService;
+                const stateCtx = auth?.authStateProvider?.getState?.()?.context || auth?._state?.context || {};
+                const candidates = [
+                    stateCtx?.tokenInfo?.accessToken,
+                    stateCtx?.accessToken,
+                    stateCtx?.token,
+                    stateCtx?.oauthToken,
+                    stateCtx?.credentials?.accessToken,
+                    auth?.accessToken,
+                    auth?._accessToken,
+                    auth?._token,
+                    core.cloudCodeService?.accessToken,
+                    core.cloudCodeService?._accessToken,
+                    userStatus?.userStatus?.accessToken,
+                    userStatus?.accessToken
+                ];
+                for (const c of candidates) {
+                    if (typeof c === 'string' && c.trim().length >= 20) {
+                        oauthToken = c.trim();
+                        break;
+                    }
+                }
+                if (!oauthToken && typeof auth?.getAccessToken === 'function') {
+                    const t = await auth.getAccessToken();
+                    if (typeof t === 'string' && t.trim().length >= 20) {
+                        oauthToken = t.trim();
+                    } else if (t && typeof t.accessToken === 'string') {
+                        oauthToken = t.accessToken.trim();
+                    }
+                }
+                if (!oauthToken && typeof auth?.getToken === 'function') {
+                    const t = await auth.getToken();
+                    if (typeof t === 'string' && t.trim().length >= 20) {
+                        oauthToken = t.trim();
+                    }
+                }
+            } catch (e) {}
             
             return {
                 quotaSummary,
-                userStatus
+                userStatus,
+                oauthToken
             };
         }''')
         
@@ -98,6 +145,20 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
                 resolved_email = load_memory().get("active_account")
             except Exception:
                 pass
+
+        # Persist captured live OAuth token for Capa 1 direct HTTPS queries, or sync from Gemini profile
+        extracted_token = data.get("oauthToken")
+        if resolved_email:
+            if extracted_token and isinstance(extracted_token, str):
+                try:
+                    save_account_token(resolved_email, extracted_token)
+                except Exception as e:
+                    logger.debug(f"Failed to persist OAuth token for {resolved_email}: {e}")
+            else:
+                try:
+                    get_account_token(resolved_email)
+                except Exception:
+                    pass
                 
         # Parse Groups from Quota Summary safely
         quota_resp = (data.get("quotaSummary") or {}).get("response") or {}
@@ -139,13 +200,7 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
 
                 rem_pct = int(round(rem_fraction * 100)) if rem_fraction is not None else None
                 desc = bucket.get("description") or ""
-                reset_ts = bucket.get("resetTime") or {}
-                if isinstance(reset_ts, dict):
-                    reset_sec = reset_ts.get("seconds")
-                elif isinstance(reset_ts, (int, float)):
-                    reset_sec = int(reset_ts)
-                else:
-                    reset_sec = None
+                reset_sec = parse_reset_time_seconds(bucket.get("resetTime"))
 
                 is_disabled = bucket.get("disabled", False)
                 if is_disabled:
@@ -180,7 +235,7 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
                 models_data[m_id] = {
                     "label": m_cfg.get("label", m_id),
                     "remaining_fraction": q_info.get("remainingFraction"),
-                    "reset_time": (q_info.get("resetTime") or {}).get("seconds") if isinstance(q_info.get("resetTime"), dict) else q_info.get("resetTime"),
+                    "reset_time": parse_reset_time_seconds(q_info.get("resetTime")),
                     "disabled": m_cfg.get("disabled", False)
                 }
                 
@@ -324,21 +379,27 @@ async def get_quota_limits(
     Tier 2 (React context direct): If page provided, queries React fiber background context (<50ms).
     Tier 3 (UI / memory fallback): Scrapes Models dialog if page present, or returns token_memory status.
     """
-    # Tier 1: Direct HTTPS Google Cloud Code
-    token = access_token
-    if not token and known_email:
-        token = get_account_token(known_email)
-
-    if token:
-        res = query_cloud_code_quota_direct(access_token=token, email=known_email)
+    # Tier 1: Direct HTTPS Google Cloud Code when access_token is explicitly provided or no page is attached
+    if access_token:
+        res = query_cloud_code_quota_direct(access_token=access_token, email=known_email)
         if res.get("status") == "OK":
             return res
 
-    # Tier 2: React Fiber direct background reading
+    # Tier 2: React Fiber direct background reading when live page is available (<50ms, captures fresh OAuth token)
     if page:
         direct = await get_direct_quota_limits(page, known_email)
         if direct and (direct.get("weekly_remaining_pct") is not None or direct.get("five_hour_remaining_pct") is not None):
             return direct
+
+    # Stored token direct HTTPS query (when page is None or React Fiber didn't return quota)
+    if known_email and not access_token:
+        stored_token = get_account_token(known_email)
+        if stored_token:
+            res = query_cloud_code_quota_direct(access_token=stored_token, email=known_email)
+            if res.get("status") == "OK":
+                return res
+
+    if page:
         return await get_ui_quota_limits(page, known_email)
 
     # Tier 3: Memory fallback

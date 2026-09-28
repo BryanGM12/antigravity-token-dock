@@ -81,6 +81,7 @@ def switch_to_interactive_desktop(desktop_name: Optional[str] = None) -> bool:
     """Switches current thread desktop to the target or 'default' interactive desktop."""
     global _ACTIVE_DESKTOP
     target_d = desktop_name or _ACTIVE_DESKTOP or "default"
+    h_desk = None
     try:
         h_desk = user32.OpenDesktopW(target_d, 0, False, 0x01FF)
         if not h_desk:
@@ -92,6 +93,12 @@ def switch_to_interactive_desktop(desktop_name: Optional[str] = None) -> bool:
     except Exception as e:
         logger.debug(f"Failed to switch thread desktop to {target_d}: {e}")
         return False
+    finally:
+        if h_desk:
+            try:
+                user32.CloseDesktop(h_desk)
+            except Exception:
+                pass
 
 def get_default_browser_info() -> Tuple[str, str]:
     """
@@ -535,10 +542,10 @@ def select_account_via_uiautomation(hwnd: int, target_email: str) -> bool:
         norm_email = target_email.strip().lower()
         user_part = norm_email.split("@")[0]
 
-        # Search for control containing target email or user prefix
+        # Search for control containing target email or exact word-bounded user prefix
         for ctrl, _ in auto.WalkTree(window, maxDepth=14):
             cname = (ctrl.Name or "").lower()
-            if norm_email in cname or user_part in cname:
+            if norm_email in cname or (re.search(rf'\b{re.escape(user_part)}\b', cname) is not None):
                 logger.info(f"[UIA] Encontrado control de cuenta para {target_email}: '{ctrl.Name}' ({ctrl.ControlTypeName})")
                 try:
                     inv = ctrl.GetInvokePattern()
@@ -564,10 +571,13 @@ def select_account_via_uiautomation(hwnd: int, target_email: str) -> bool:
 def select_account_via_tabs(hwnd: int, target_email: str) -> bool:
     """Deterministic Tab navigation fallback for Google Account Chooser screen."""
     norm = target_email.strip().lower()
+    norm_user = norm.split("@")[0].strip()
     tab_map = get_account_tab_map()
     tab_count = None
     for acc, count in tab_map.items():
-        if acc.split("@")[0] in norm or norm in acc:
+        acc_clean = acc.strip().lower()
+        acc_user = acc_clean.split("@")[0].strip()
+        if acc_clean == norm or acc_user == norm_user:
             tab_count = count
             break
 
@@ -679,8 +689,14 @@ def run_native_ocr(hwnd: int) -> List[Dict[str, Any]]:
             creationflags=creationflags
         )
         raw_items = json.loads(res.stdout.strip() or "[]")
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        elif not isinstance(raw_items, list):
+            raw_items = []
         screen_items = []
         for item in raw_items:
+            if not isinstance(item, dict):
+                continue
             it = dict(item)
             it["screen_cx"] = rect.left + item.get("cx", 0)
             it["screen_cy"] = rect.top + item.get("cy", 0)
@@ -987,6 +1003,12 @@ def confirm_consent_screen(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] 
     activate_browser_window(hwnd)
     time.sleep(0.04)
 
+    # Tier 1: Wake up Chromium DOM accessibility first
+    wake_up_chromium_accessibility(hwnd)
+
+    # Tier 2: Ensure permission checkboxes ('Seleccionar todo' / 'Select all') are checked BEFORE clicking action button
+    find_and_toggle_permissions_checkbox(hwnd, ocr_items=ocr_items)
+
     # Tier 0: Fast-Path Instant CV Primary Blue Pill Button Detection (15ms)
     blue_pos = detect_blue_button_center(hwnd)
     if blue_pos:
@@ -997,12 +1019,6 @@ def confirm_consent_screen(hwnd: int, ocr_items: Optional[List[Dict[str, Any]]] 
         physical_click(bx, by)
         time.sleep(0.15)
         return True
-
-    # Tier 1: Wake up Chromium DOM accessibility
-    wake_up_chromium_accessibility(hwnd)
-
-    # Tier 2: Ensure permission checkboxes are selected (using shared ocr_items if available)
-    find_and_toggle_permissions_checkbox(hwnd, ocr_items=ocr_items)
 
     # Tier 3: Multi-Modal Intelligent Button Finder (CV + OCR + Scroll)
     btn_target = find_interactive_button(hwnd, allow_scroll=True, ocr_items=ocr_items)
@@ -1433,8 +1449,17 @@ def handle_external_google_signin(
     locked_hwnd: Optional[int] = None
     account_selected = False
     challenge_notified = False
+    challenge_focused_screen: Optional[str] = None
     last_prompt_number: Optional[str] = None
     current_screen_type: str = "UNKNOWN"
+
+    def _wait_with_auth_sync(duration_sec: float = 1.2):
+        """Waits up to duration_sec for browser navigation while checking auth_event every 100ms."""
+        steps = max(1, int(duration_sec / 0.1))
+        for _ in range(steps):
+            if auth_event and auth_event.is_set():
+                return
+            time.sleep(0.1)
 
     while time.time() < effective_deadline and (time.time() - start_time) < max_safety_limit:
         # 0. Real-time background sync with Antigravity workbench
@@ -1516,17 +1541,21 @@ def handle_external_google_signin(
 
         # 1. Handle Google Verification Challenges (Phone prompt, SMS, Authenticator, Password, etc.)
         if screen_type.startswith("CHALLENGE") or screen_type == "SIGNIN_FORM":
-            # Bring browser window to the foreground so the user sees the challenge clearly
-            force_foreground_window(hwnd)
+            # Only force foreground if the browser window is not already the foreground window,
+            # avoiding repeated VK_MENU (Alt) keystrokes while the user is typing their 2FA code.
+            if user32.GetForegroundWindow() != hwnd:
+                force_foreground_window(hwnd)
 
             ch_details = extract_verification_challenge_details(ocr_items, title=title, cached_url=cached_url)
             p_num = ch_details.get("prompt_number")
             desc = ch_details.get("description") or "Google requiere verificación adicional."
             has_err = ch_details.get("has_error", False)
 
-            # If it's a code, password, or generic challenge, focus the input field
+            # Focus the input field ONCE when entering this challenge screen (never repeat every 800ms)
             if screen_type in ["CHALLENGE_CODE", "CHALLENGE_PASSWORD", "CHALLENGE_GENERIC"]:
-                focus_challenge_input_field(hwnd)
+                if challenge_focused_screen != screen_type:
+                    focus_challenge_input_field(hwnd)
+                    challenge_focused_screen = screen_type
 
             if not challenge_notified or (p_num and p_num != last_prompt_number) or has_err:
                 challenge_notified = True
@@ -1558,20 +1587,23 @@ def handle_external_google_signin(
             time.sleep(0.8)
             continue
 
+        # Reset challenge focus tracker if we left the challenge screen
+        challenge_focused_screen = None
+
         # 2. Handle Account Chooser screen
         if screen_type == "CHOOSER" and selection_attempts < 5:
             selection_attempts += 1
             logger.info(f"Detected Google Account Chooser screen (attempt {selection_attempts}/5)...")
             select_account_via_centered_click(hwnd, target_email, ocr_items=ocr_items)
             account_selected = True
-            time.sleep(0.15)
+            _wait_with_auth_sync(1.2)
             continue
 
         # 3. Handle Consent / 'Acceder' screen (STRICT: only when screen_type is CONSENT!)
         if screen_type == "CONSENT":
             logger.info("Detected OAuth consent / 'Acceder' screen. Confirming with multi-strategy engine...")
             confirm_consent_screen(hwnd, ocr_items=ocr_items)
-            time.sleep(0.15)
+            _wait_with_auth_sync(1.2)
             continue
 
         time.sleep(0.04)

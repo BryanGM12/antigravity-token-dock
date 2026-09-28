@@ -265,18 +265,22 @@ async def get_current_logged_in_email(page: Page, close_after: bool = True, allo
         direct_email = await page.evaluate(r'''async () => {
             let core = window.__antigravityCore;
             if (!core) {
-                const candidates = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside');
-                for (const el of candidates) {
-                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                const primary = document.querySelectorAll('div[id], div[class*="workbench"], main, #root, [data-testid], nav, aside, button, header');
+                const allNodes = primary.length > 0 ? Array.from(primary) : Array.from(document.querySelectorAll('*')).slice(0, 300);
+                for (const el of allNodes) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                     if (!key) continue;
                     let cur = el[key];
-                    while (cur) {
-                        if (cur.memoizedProps?.value?.core?.authService) {
-                            core = cur.memoizedProps.value.core;
+                    let depth = 0;
+                    while (cur && depth < 100) {
+                        const candidate = cur.memoizedProps?.value?.core || cur.memoizedProps?.core || cur.stateNode?.core;
+                        if (candidate?.authService) {
+                            core = candidate;
                             window.__antigravityCore = core;
                             break;
                         }
                         cur = cur.return;
+                        depth++;
                     }
                     if (core) break;
                 }
