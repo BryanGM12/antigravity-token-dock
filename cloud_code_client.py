@@ -96,7 +96,7 @@ def _load_gemini_profile_alias_map() -> Dict[str, str]:
     email_to_alias: Dict[str, str] = {
         "delsidasatte@gmail.com": "delsidas",
         "atteelsidas@gmail.com": "atteelsidas",
-        "bryan.gsamaniegom@gmail.com": "bryan",
+        "tom12bryan@gmail.com": "tom",
         "gilsamaniego12m@gmail.com": "gil",
     }
     if os.path.exists(GEMINI_REGISTRY_FILE):
@@ -202,9 +202,31 @@ def load_all_account_tokens(sync_profiles: bool = True) -> Dict[str, str]:
         data = SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
         if not isinstance(data, dict):
             data = {}
+
+        auth_set = set()
+        try:
+            from config_manager import get_authorized_emails
+            auth_list = get_authorized_emails()
+            if auth_list:
+                auth_set = {a.strip().lower() for a in auth_list if a and "account" not in a.lower()}
+        except Exception:
+            pass
+
+        if auth_set:
+            stale = [k for k in list(data.keys()) if k.strip().lower() not in auth_set]
+            if stale:
+                for k in stale:
+                    del data[k]
+                try:
+                    SafeJsonStore.save_json(TOKEN_STORE_FILE, data)
+                except Exception:
+                    pass
+
         if sync_profiles:
             email_to_alias = _load_gemini_profile_alias_map()
             for norm_email in email_to_alias:
+                if auth_set and norm_email not in auth_set:
+                    continue
                 try:
                     fresh = refresh_oauth_token_for_email(norm_email, force=False)
                     if fresh:

@@ -55,7 +55,7 @@ from account_rotator import (
 )
 
 async def run_all_tests():
-    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (38 PRUEBAS) ---")
+    print("\n--- INICIANDO TEST HARNESS DE CONTROLADOR ANTIGRAVITY (49 PRUEBAS) ---")
     
     # 1. CDP Port Check
     port = get_cdp_port()
@@ -652,8 +652,108 @@ async def run_all_tests():
                 pass
     print("[PASS] 46. [CRIT-03/HIGH-01] Protección de lockfile O_EXCL en vuelo (<3s grace period) verificada.")
 
-    print("\n--- TODOS LOS 46 TESTS PASARON EXITOSAMENTE (100%) ---\n")
+    # 47. Reconciliación de Cuotas por Modelo (`_reconcile_models_with_groups`) tras Recarga 5h y Sondeo Cloud Code
+    from token_memory import _reconcile_models_with_groups, check_recharge_notifications
+    synth_acc_entry = {
+        "gemini": {
+            "five_hour_remaining_pct": 100,
+            "weekly_remaining_pct": 75,
+            "five_hour_reset_time": None,
+            "weekly_reset_time": int(time.time()) + 86400
+        },
+        "claude_gpt": {
+            "five_hour_remaining_pct": 80,
+            "weekly_remaining_pct": 0,
+            "five_hour_reset_time": int(time.time()) + 7200,
+            "weekly_reset_time": int(time.time()) + 172800
+        },
+        "models": {
+            "gemini-3.8-flash-high": {
+                "label": "Gemini 3 Flash High",
+                "remaining_fraction": 0,
+                "reset_time": int(time.time()) - 3600,
+                "disabled": False
+            },
+            "claude-sonnet-4.6": {
+                "label": "Claude Sonnet 4.6",
+                "remaining_fraction": 0.5,
+                "reset_time": int(time.time()) + 7200,
+                "disabled": False
+            }
+        }
+    }
+    reconciled_changed = _reconcile_models_with_groups(synth_acc_entry, now_ts=time.time(), sync_live_buckets=True)
+    assert reconciled_changed is True, "Debe detectar y reconciliar fracciones de modelos desactualizadas"
+    assert synth_acc_entry["models"]["gemini-3.8-flash-high"]["remaining_fraction"] == 1.0, (
+        "Modelo Gemini con reset_time expirado y bucket 5h=100% debe reconciliarse a 1.0"
+    )
+    assert synth_acc_entry["models"]["gemini-3.8-flash-high"]["reset_time"] is None, (
+        "reset_time expirado en modelo Gemini al 100% debe limpiarse a None"
+    )
+    assert synth_acc_entry["models"]["claude-sonnet-4.6"]["remaining_fraction"] == 0, (
+        "Modelo Claude con cuota semanal en 0% debe reconciliarse a 0"
+    )
+    check_recharge_notifications()
+    for acc_email in AUTHORIZED_ACCOUNTS:
+        eff_st = get_effective_account_status(acc_email)
+        g_5h_eff = eff_st.get("gemini", {}).get("five_hour_remaining_pct")
+        g_wk_eff = eff_st.get("gemini", {}).get("weekly_remaining_pct")
+        if g_5h_eff == 100 and (g_wk_eff is None or g_wk_eff > 0):
+            for m_id, m_val in (eff_st.get("models") or {}).items():
+                if "gemini" in m_id.lower():
+                    assert m_val.get("remaining_fraction") == 1.0, (
+                        f"Modelo {m_id} de {acc_email} (5h=100%) no debe mostrar fracción obsoleta ({m_val.get('remaining_fraction')})"
+                    )
+    print("[PASS] 47. Reconciliación de cuotas por modelo ('Modelos En Vivo') tras recarga 5h y Cloud Code verificada.")
+
+    # 48. Prevención de Colisión Cruzada de Alias en Selector OAuth (`find_account_row_interactive`)
+    mock_chooser_ocr = [
+        {"type": "line", "text": "Bryan Samaniego", "screen_cx": 860, "screen_cy": 500, "w": 180, "h": 24},
+        {"type": "line", "text": "bryan.gsamaniegom@gmail.com", "screen_cx": 867, "screen_cy": 525, "w": 240, "h": 20},
+        {"type": "line", "text": "tom12bryan@gmail.com", "screen_cx": 867, "screen_cy": 600, "w": 210, "h": 20},
+    ]
+    # Searching for gilsamaniego12m@gmail.com ("Gil Samaniego") when only bryan.gsamaniegom@gmail.com is on screen MUST return None
+    false_match = find_account_row_interactive(
+        0,
+        "gilsamaniego12m@gmail.com",
+        allow_scroll=False,
+        ocr_items=mock_chooser_ocr
+    )
+    assert false_match is None, (
+        f"find_account_row_interactive NO debe confundir 'bryan.gsamaniegom@gmail.com' con 'gilsamaniego12m@gmail.com' (obtenido: {false_match})"
+    )
+    # When Gil Samaniego's actual email or display name is present, it MUST match accurately
+    mock_chooser_with_gil = mock_chooser_ocr + [
+        {"type": "line", "text": "gilsamaniego12m@gmail.com", "screen_cx": 867, "screen_cy": 680, "w": 230, "h": 20}
+    ]
+    true_match = find_account_row_interactive(
+        0,
+        "gilsamaniego12m@gmail.com",
+        allow_scroll=False,
+        ocr_items=mock_chooser_with_gil
+    )
+    assert true_match is not None and true_match[0] == 867 and true_match[1] == 680, (
+        f"Debe localizar exactamente la fila de gilsamaniego12m@gmail.com en (867, 680), obtenido: {true_match}"
+    )
+    print("[PASS] 48. Prevención de colisión cruzada de alias ('samaniego' vs 'bryan.gsamaniegom@gmail.com') verificada.")
+
+    # 49. Purgado de Cuentas Retiradas en `account_tokens.json` y Aislamiento de Logger en `daemon_service`
+    toks_cleaned = load_all_account_tokens(sync_profiles=True)
+    assert "bryan.gsamaniegom@gmail.com" not in toks_cleaned, (
+        "Cuenta retirada 'bryan.gsamaniegom@gmail.com' debe ser purgada de account_tokens.json"
+    )
+    root_handlers = logging.getLogger().handlers
+    has_prod_log_handler = any(
+        getattr(h, "baseFilename", "").lower().endswith("controller.log") for h in root_handlers
+    )
+    assert has_prod_log_handler is False, (
+        "Importar daemon_service desde test_harness NO debe contaminar controller.log de producción"
+    )
+    print("[PASS] 49. Purgado de cuentas retiradas en account_tokens.json y aislamiento de controller.log verificados.")
+
+    print("\n--- TODOS LOS 49 TESTS PASARON EXITOSAMENTE (100%) ---\n")
 
 if __name__ == "__main__":
     import os
     asyncio.run(run_all_tests())
+

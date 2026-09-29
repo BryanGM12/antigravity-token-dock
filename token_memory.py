@@ -220,6 +220,79 @@ def save_memory(data: Dict[str, Any], force: bool = False) -> bool:
         _last_disk_hash = current_hash
         return True
 
+def _reconcile_models_with_groups(
+    acc_entry: Dict[str, Any],
+    now_ts: Optional[float] = None,
+    sync_live_buckets: bool = False
+) -> bool:
+    """
+    Synchronizes per-model quotas (`models`) with their corresponding bucket groups (`gemini`, `claude_gpt`)
+    whenever a model's reset_time has elapsed, its bucket has recharged, or live bucket metrics were updated
+    without per-model gRPC data (e.g. via Cloud Code HTTPS polling).
+    Returns True if any model entry was updated.
+    """
+    models = acc_entry.get("models")
+    if not models or not isinstance(models, dict):
+        return False
+
+    if now_ts is None:
+        now_ts = datetime.now().timestamp()
+
+    gem = acc_entry.get("gemini") or {}
+    c_gpt = acc_entry.get("claude_gpt") or {}
+    changed = False
+
+    for m_id, m_info in models.items():
+        if not isinstance(m_info, dict):
+            continue
+        m_low = str(m_id).lower()
+        grp = gem if "gemini" in m_low else c_gpt
+
+        g_5h = grp.get("five_hour_remaining_pct")
+        g_wk = grp.get("weekly_remaining_pct")
+        if g_wk is not None and g_wk <= 0:
+            grp_pct = 0
+        elif g_5h is not None:
+            grp_pct = g_5h
+        elif g_wk is not None:
+            grp_pct = g_wk
+        else:
+            grp_pct = None
+
+        if grp_pct is None:
+            continue
+
+        m_reset = m_info.get("reset_time")
+        reset_expired = bool(m_reset and isinstance(m_reset, (int, float)) and now_ts >= m_reset)
+        grp_recharged = bool(grp.get("five_hour_recharged") or grp.get("weekly_recharged"))
+        m_frac = m_info.get("remaining_fraction")
+        stale_mismatch = bool(
+            m_frac is not None and abs(int(round(float(m_frac) * 100)) - int(grp_pct)) >= 5
+        )
+
+        if sync_live_buckets or reset_expired or grp_recharged or stale_mismatch:
+            new_frac = round(max(0.0, min(100.0, float(grp_pct))) / 100.0, 4)
+            if new_frac == 1.0:
+                new_frac = 1.0
+            elif new_frac == 0.0:
+                new_frac = 0
+            if m_info.get("remaining_fraction") != new_frac:
+                m_info["remaining_fraction"] = new_frac
+                changed = True
+
+            target_reset = grp.get("five_hour_reset_time") if grp_pct > 0 else (
+                grp.get("weekly_reset_time") or grp.get("five_hour_reset_time")
+            )
+            if reset_expired and target_reset and target_reset <= now_ts:
+                target_reset = None
+            if target_reset is not None or reset_expired or grp_pct == 100:
+                if m_info.get("reset_time") != target_reset:
+                    m_info["reset_time"] = target_reset
+                    changed = True
+
+    return changed
+
+
 def update_account_snapshot(
     email: str,
     weekly_pct: Optional[int] = None,
@@ -237,6 +310,7 @@ def update_account_snapshot(
     with _memory_lock:
         data = load_memory()
         now = datetime.now()
+        now_ts = now.timestamp()
         norm_email = email.strip().lower()
         
         target_key = None
@@ -276,6 +350,14 @@ def update_account_snapshot(
             gem["weekly_reset_time"] = weekly_reset_time
         if five_hour_reset_time:
             gem["five_hour_reset_time"] = five_hour_reset_time
+
+        # Clear expired 5h reset timestamps if 5h bucket is at 100%
+        if gem.get("five_hour_remaining_pct") == 100 and (
+            not five_hour_reset_time and not (gemini_data or {}).get("five_hour_reset_time")
+        ):
+            if gem.get("five_hour_reset_time") and gem["five_hour_reset_time"] <= now_ts:
+                gem["five_hour_reset_time"] = None
+            gem["five_hour_refresh_text"] = "Recargado (100%)"
             
         # Calculate Gemini ETAs
         if gem.get("weekly_reset_time"):
@@ -326,9 +408,14 @@ def update_account_snapshot(
             if d:
                 c_gpt["five_hour_refresh_eta"] = (now + d).isoformat()
                 
-        # Process Models Data
+        # Process Models Data and reconcile with bucket groups
         if models_data:
             acc_entry.setdefault("models", {}).update(models_data)
+        _reconcile_models_with_groups(
+            acc_entry,
+            now_ts=now_ts,
+            sync_live_buckets=not bool(models_data)
+        )
             
         # Maintain top-level compatibility (defaults to Gemini values)
         acc_entry["weekly_remaining_pct"] = gem.get("weekly_remaining_pct")
@@ -363,6 +450,7 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
         acc = data["accounts"].get(target_key, _init_empty_account_record())
         
         now = datetime.now()
+        now_ts = now.timestamp()
         result = json.loads(json.dumps(acc))
         result["email"] = target_key
         active_acc = (data.get("active_account") or "").strip().lower()
@@ -409,6 +497,9 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
         process_group(gem)
         c_gpt = result.setdefault("claude_gpt", {})
         process_group(c_gpt)
+
+        # Reconcile per-model quotas with effective group state
+        _reconcile_models_with_groups(result, now_ts=now_ts, sync_live_buckets=False)
         
         # Sync top-level backward compatibility fields from Gemini
         result["five_hour_remaining_pct"] = gem.get("five_hour_remaining_pct")
@@ -663,29 +754,44 @@ def set_sound_enabled(enabled: bool) -> bool:
 def check_recharge_notifications() -> List[str]:
     """
     Checks if any previously exhausted accounts have finished their 5h countdown.
-    Marks them as recharged and returns the list of newly recharged emails.
+    Marks them as recharged, reconciles per-model quotas, and returns the list of newly recharged emails.
     """
     with _memory_lock:
         mem = load_memory()
         recharged = []
         now = datetime.now()
+        now_ts = now.timestamp()
         updated = False
         
         for email, acc in mem.get("accounts", {}).items():
-            if acc.get("is_exhausted"):
-                eta_str = acc.get("five_hour_refresh_eta")
-                if eta_str:
-                    try:
-                        eta_dt = datetime.fromisoformat(eta_str)
-                        if now >= eta_dt:
+            gem = acc.setdefault("gemini", {})
+            eta_str = acc.get("five_hour_refresh_eta") or gem.get("five_hour_refresh_eta")
+            if acc.get("is_exhausted") and eta_str:
+                try:
+                    eta_dt = datetime.fromisoformat(eta_str)
+                    if now >= eta_dt:
+                        g_wk = gem.get("weekly_remaining_pct")
+                        if g_wk is None or g_wk > 0:
                             acc["is_exhausted"] = False
-                            gem = acc.setdefault("gemini", {})
-                            gem["five_hour_remaining_pct"] = 100
-                            gem["five_hour_refresh_text"] = "Recargado (100%)"
-                            recharged.append(email)
-                            updated = True
-                    except Exception:
-                        pass
+                        gem["five_hour_remaining_pct"] = 100
+                        gem["five_hour_refresh_text"] = "Recargado (100%)"
+                        gem["five_hour_reset_time"] = None
+                        acc["five_hour_remaining_pct"] = 100
+                        acc["five_hour_refresh_text"] = "Recargado (100%)"
+                        recharged.append(email)
+                        updated = True
+                except Exception:
+                    pass
+
+            # Ensure top-level fields and per-model fractions stay synchronized with bucket state
+            if gem.get("five_hour_remaining_pct") is not None and acc.get("five_hour_remaining_pct") != gem.get("five_hour_remaining_pct"):
+                acc["five_hour_remaining_pct"] = gem.get("five_hour_remaining_pct")
+                acc["five_hour_refresh_text"] = gem.get("five_hour_refresh_text")
+                updated = True
+
+            if _reconcile_models_with_groups(acc, now_ts=now_ts, sync_live_buckets=False):
+                updated = True
+
         if updated:
             save_memory(mem)
         return recharged

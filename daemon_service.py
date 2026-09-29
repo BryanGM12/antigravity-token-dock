@@ -37,25 +37,29 @@ class AutoFlushRotatingFileHandler(RotatingFileHandler):
 
 AutoFlushFileHandler = AutoFlushRotatingFileHandler
 
-# Configure root logger explicitly before importing submodules
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-for h in list(root_logger.handlers):
-    root_logger.removeHandler(h)
+def configure_daemon_logging():
+    """Configures root logger with AutoFlushRotatingFileHandler and UTF-8 console output."""
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
 
-formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-file_handler = AutoFlushRotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
-file_handler.setFormatter(formatter)
-root_logger.addHandler(file_handler)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    file_handler = AutoFlushRotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
 
-if sys.stdout is not None:
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    root_logger.addHandler(stream_handler)
+    if sys.stdout is not None:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+if __name__ == "__main__":
+    configure_daemon_logging()
 
 logger = logging.getLogger("AntigravityDaemon")
 
@@ -261,6 +265,11 @@ async def check_status_cli():
         except Exception as e:
             logger.warning(f"No se pudo sincronizar cuota en vivo via CDP: {e}")
             
+    try:
+        check_recharge_notifications()
+    except Exception:
+        pass
+
     # Print the formatted memory status table
     print(format_memory_status_table())
 
@@ -359,8 +368,10 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
         
     last_switch_time = 0
     last_ui_sample_time = 0
+    last_bg_quota_sync_time = 0
     last_retention_notify_time = 0
     UI_SAMPLE_INTERVAL = 20  # Sample UI quota every 20 seconds for live token display
+    BG_QUOTA_SYNC_INTERVAL = 60  # Poll standby accounts via Capa 1 HTTPS every 60 seconds
     
     circuit_breaker = RotationCircuitBreaker(
         failure_threshold=3,
@@ -400,6 +411,12 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
             await ensure_dark_theme(page)
             await get_quota_limits(page)
             last_ui_sample_time = time.time()
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, get_decoupled_parallel_quotas)
+                last_bg_quota_sync_time = time.time()
+            except Exception as bg_init_err:
+                logger.debug(f"[Capa 1] Sondeo paralelo inicial no completado: {bg_init_err}")
             
             # Record sample in analytics
             mem = load_memory()
@@ -474,6 +491,15 @@ async def run_daemon_loop(poll_interval_sec: int = 15):
                             save_memory(mem)
                     except Exception:
                         pass
+
+                # Periodic background Capa 1 HTTPS sync for standby accounts
+                if (now - last_bg_quota_sync_time) > BG_QUOTA_SYNC_INTERVAL:
+                    last_bg_quota_sync_time = now
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, get_decoupled_parallel_quotas)
+                    except Exception as bg_err:
+                        logger.debug(f"[Capa 1] Sondeo paralelo en background no completado: {bg_err}")
                     
                 is_exhausted = log_exhausted or chat_exhausted
                 reason = chat_reason if chat_exhausted else (log_reason if log_exhausted else "")

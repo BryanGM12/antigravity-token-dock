@@ -791,7 +791,7 @@ def detect_blue_button_center(hwnd: int) -> Optional[Tuple[int, int]]:
         return best["screen_cx"], best["screen_cy"]
     return None
 
-def scroll_page_down(hwnd: int, steps: int = 4):
+def scroll_page_down(hwnd: int, steps: int = 4, use_page_down: bool = True):
     """Scrolls the web viewport down smoothly to reveal below-the-fold buttons."""
     activate_browser_window(hwnd)
     focus_web_contents_safely(hwnd)
@@ -800,7 +800,8 @@ def scroll_page_down(hwnd: int, steps: int = 4):
     for _ in range(steps):
         send_single_key(hwnd, VK_DOWN)
         time.sleep(0.04)
-    send_single_key(hwnd, VK_NEXT)
+    if use_page_down:
+        send_single_key(hwnd, VK_NEXT)
     time.sleep(0.2)
 
 def find_interactive_button(
@@ -893,7 +894,7 @@ def find_account_row_interactive(
 ) -> Optional[Tuple[int, int, str]]:
     """
     Intelligently discovers and locates the target account row in the Google Account Chooser screen
-    via Native Windows OCR text extraction, name aliases, and fuzzy user matching.
+    via Native Windows OCR text extraction, name aliases, and strict cross-account collision prevention.
     Returns: (screen_x, screen_y, method_name) or None.
     """
     if not hwnd or not user32.IsWindow(hwnd):
@@ -904,20 +905,35 @@ def find_account_row_interactive(
     user_part = norm_email.split("@")[0]
     clean_user = re.sub(r'[^a-z0-9]', '', user_part)
 
-    alias_keywords = [norm_email, user_part, clean_user]
+    full_display_name = ""
+    other_account_tokens = {"bryangsamaniegom", "bryan.gsamaniegom", "bryansamaniego"}
     try:
         from config_manager import load_accounts_config
         for acc in load_accounts_config():
-            if acc.get("email", "").strip().lower() == norm_email:
-                name = acc.get("name", "").strip().lower()
-                if name:
-                    alias_keywords.append(name)
-                    alias_keywords.extend(name.split())
+            acc_email = acc.get("email", "").strip().lower()
+            acc_user = acc_email.split("@")[0] if acc_email else ""
+            acc_clean_user = re.sub(r'[^a-z0-9]', '', acc_user)
+            acc_name = acc.get("name", "").strip().lower()
+            acc_clean_name = re.sub(r'[^a-z0-9]', '', acc_name) if acc_name else ""
+            if acc_email == norm_email:
+                if acc_name:
+                    full_display_name = acc_name
+            else:
+                if acc_clean_user:
+                    other_account_tokens.add(acc_clean_user)
+                    other_account_tokens.add(acc_user)
+                if acc_clean_name:
+                    other_account_tokens.add(acc_clean_name)
     except Exception:
         pass
 
+    clean_full_name = re.sub(r'[^a-z0-9]', '', full_display_name) if full_display_name else ""
+    scrolled_down = False
+
     for scroll_attempt in range(2 if allow_scroll else 1):
-        items = ocr_items if (ocr_items is not None and scroll_attempt == 0) else run_native_ocr(hwnd)
+        items = ocr_items if (ocr_items is not None and scroll_attempt == 0) else (
+            run_native_ocr(hwnd) if (hwnd and user32.IsWindow(hwnd)) else []
+        )
         if items:
             # Pass 1: Strict email / exact username match (100% distinct per account, zero ambiguity)
             for item in items:
@@ -927,20 +943,29 @@ def find_account_row_interactive(
                     logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por coincidencia exacta de correo/usuario ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
                     return item["screen_cx"], item["screen_cy"], f"ocr_exact_email:{item['text']}"
 
-            # Pass 2: Fallback to specific alias keywords
-            for item in items:
-                txt = (item.get("text") or "").strip().lower()
-                clean_txt = re.sub(r'[^a-z0-9]', '', txt)
-                for kw in alias_keywords:
-                    clean_kw = re.sub(r'[^a-z0-9]', '', kw)
-                    if len(clean_kw) >= 4 and (clean_kw in clean_txt or kw in txt):
-                        logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por alias ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
+            # Pass 2: Fallback to full display name only (never single split words like 'gil', 'samaniego', 'atte')
+            if clean_full_name and len(clean_full_name) >= 5:
+                for item in items:
+                    txt = (item.get("text") or "").strip().lower()
+                    clean_txt = re.sub(r'[^a-z0-9]', '', txt)
+                    if "@" in txt or "gmail.com" in txt or "googlemail.com" in txt:
+                        continue
+                    if any(other_tok and other_tok in clean_txt for other_tok in other_account_tokens):
+                        continue
+                    if clean_full_name in clean_txt or full_display_name in txt:
+                        logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por nombre completo ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
                         return item["screen_cx"], item["screen_cy"], f"ocr_alias:{item['text']}"
 
-        if scroll_attempt == 0 and allow_scroll:
+        if scroll_attempt == 0 and allow_scroll and hwnd and user32.IsWindow(hwnd):
             logger.info("[SMART-LOCATOR] Cuenta no visible en primera pasada; desplazando selector hacia abajo...")
-            scroll_page_down(hwnd, steps=2)
+            scroll_page_down(hwnd, steps=4, use_page_down=False)
+            scrolled_down = True
             time.sleep(0.15)
+
+    if scrolled_down and hwnd and user32.IsWindow(hwnd):
+        # Restore viewport to top so fallback physical click coordinates remain aligned
+        send_single_key(hwnd, 0x24)  # VK_HOME
+        time.sleep(0.1)
 
     return None
 
