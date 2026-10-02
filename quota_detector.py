@@ -23,7 +23,8 @@ from cloud_code_client import (
     monitor_accounts_parallel,
     save_account_token,
     get_account_token,
-    load_all_account_tokens
+    load_all_account_tokens,
+    sync_active_antigravity_oauth_token
 )
 
 logger = logging.getLogger("QuotaDetector")
@@ -146,9 +147,13 @@ async def get_direct_quota_limits(page: Page, known_email: Optional[str] = None)
             except Exception:
                 pass
 
-        # Persist captured live OAuth token for Capa 1 direct HTTPS queries, or sync from Gemini profile
+        # Persist captured live OAuth token for Capa 1 direct HTTPS queries, or sync from Windows Credential Manager / Gemini profile
         extracted_token = data.get("oauthToken")
         if resolved_email:
+            try:
+                sync_active_antigravity_oauth_token(fallback_email=resolved_email)
+            except Exception:
+                pass
             if extracted_token and isinstance(extracted_token, str):
                 try:
                     save_account_token(resolved_email, extracted_token)

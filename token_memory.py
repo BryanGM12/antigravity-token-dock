@@ -357,6 +357,7 @@ def update_account_snapshot(
         ):
             if gem.get("five_hour_reset_time") and gem["five_hour_reset_time"] <= now_ts:
                 gem["five_hour_reset_time"] = None
+            gem["five_hour_refresh_eta"] = None
             gem["five_hour_refresh_text"] = "Recargado (100%)"
             
         # Calculate Gemini ETAs
@@ -386,6 +387,12 @@ def update_account_snapshot(
             for k, v in claude_data.items():
                 if v is not None:
                     c_gpt[k] = v
+
+        if c_gpt.get("five_hour_remaining_pct") == 100 and not (claude_data or {}).get("five_hour_reset_time"):
+            if c_gpt.get("five_hour_reset_time") and c_gpt["five_hour_reset_time"] <= now_ts:
+                c_gpt["five_hour_reset_time"] = None
+                c_gpt["five_hour_refresh_eta"] = None
+                c_gpt["five_hour_refresh_text"] = "Recargado (100%)"
                     
         # Calculate Claude ETAs
         if c_gpt.get("weekly_reset_time"):
@@ -466,12 +473,14 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
             if grp.get("five_hour_refresh_eta"):
                 try:
                     eta = datetime.fromisoformat(grp["five_hour_refresh_eta"])
-                    grp["five_hour_eta_clock"] = eta.strftime("%H:%M")
                     if now >= eta:
                         grp["five_hour_remaining_pct"] = 100
                         grp["five_hour_recharge_in"] = "Recargado (100%)"
                         grp["five_hour_recharged"] = True
+                        grp["five_hour_eta_clock"] = None
+                        grp["five_hour_remaining_seconds"] = 0
                     else:
+                        grp["five_hour_eta_clock"] = eta.strftime("%H:%M")
                         rem_sec = max(0, int((eta - now).total_seconds()))
                         grp["five_hour_remaining_seconds"] = rem_sec
                         grp["five_hour_recharge_in"] = f"{rem_sec // 3600}h {(rem_sec % 3600) // 60}m"
@@ -481,12 +490,14 @@ def get_effective_account_status(email: str) -> Dict[str, Any]:
             if grp.get("weekly_refresh_eta"):
                 try:
                     w_eta = datetime.fromisoformat(grp["weekly_refresh_eta"])
-                    grp["weekly_eta_clock"] = w_eta.strftime("%d/%m %H:%M")
                     if now >= w_eta:
                         grp["weekly_remaining_pct"] = 100
                         grp["weekly_recharge_in"] = "Recargado (100%)"
                         grp["weekly_recharged"] = True
+                        grp["weekly_eta_clock"] = None
+                        grp["weekly_remaining_seconds"] = 0
                     else:
+                        grp["weekly_eta_clock"] = w_eta.strftime("%d/%m %H:%M")
                         rem_sec = max(0, int((w_eta - now).total_seconds()))
                         grp["weekly_remaining_seconds"] = rem_sec
                         grp["weekly_recharge_in"] = f"{rem_sec // 86400}d {(rem_sec % 86400) // 3600}h"
@@ -753,8 +764,9 @@ def set_sound_enabled(enabled: bool) -> bool:
 
 def check_recharge_notifications() -> List[str]:
     """
-    Checks if any previously exhausted accounts have finished their 5h countdown.
-    Marks them as recharged, reconciles per-model quotas, and returns the list of newly recharged emails.
+    Checks if any accounts have finished their 5h countdown.
+    Marks previously exhausted accounts as recharged, cleans up expired 5h ETAs/timestamps,
+    reconciles per-model quotas, and returns the list of newly recharged emails.
     """
     with _memory_lock:
         mem = load_memory()
@@ -765,20 +777,38 @@ def check_recharge_notifications() -> List[str]:
         
         for email, acc in mem.get("accounts", {}).items():
             gem = acc.setdefault("gemini", {})
+            c_gpt = acc.setdefault("claude_gpt", {})
             eta_str = acc.get("five_hour_refresh_eta") or gem.get("five_hour_refresh_eta")
-            if acc.get("is_exhausted") and eta_str:
+            if eta_str:
                 try:
                     eta_dt = datetime.fromisoformat(eta_str)
                     if now >= eta_dt:
+                        was_exhausted = bool(acc.get("is_exhausted"))
                         g_wk = gem.get("weekly_remaining_pct")
                         if g_wk is None or g_wk > 0:
                             acc["is_exhausted"] = False
                         gem["five_hour_remaining_pct"] = 100
                         gem["five_hour_refresh_text"] = "Recargado (100%)"
                         gem["five_hour_reset_time"] = None
+                        gem["five_hour_refresh_eta"] = None
                         acc["five_hour_remaining_pct"] = 100
                         acc["five_hour_refresh_text"] = "Recargado (100%)"
-                        recharged.append(email)
+                        acc["five_hour_refresh_eta"] = None
+                        if was_exhausted and not acc.get("is_exhausted"):
+                            recharged.append(email)
+                        updated = True
+                except Exception:
+                    pass
+
+            c_eta_str = c_gpt.get("five_hour_refresh_eta")
+            if c_eta_str:
+                try:
+                    c_eta_dt = datetime.fromisoformat(c_eta_str)
+                    if now >= c_eta_dt:
+                        c_gpt["five_hour_remaining_pct"] = 100
+                        c_gpt["five_hour_refresh_text"] = "Recargado (100%)"
+                        c_gpt["five_hour_reset_time"] = None
+                        c_gpt["five_hour_refresh_eta"] = None
                         updated = True
                 except Exception:
                     pass

@@ -939,7 +939,17 @@ def find_account_row_interactive(
             for item in items:
                 txt = (item.get("text") or "").strip().lower()
                 clean_txt = re.sub(r'[^a-z0-9]', '', txt)
-                if norm_email in txt or clean_txt == clean_user or (re.search(rf'\b{re.escape(user_part)}\b', txt) is not None):
+                is_user_match = (
+                    norm_email in txt
+                    or clean_txt == clean_user
+                    or (re.search(rf'\b{re.escape(user_part)}\b', txt) is not None)
+                    or (
+                        len(clean_user) >= 6
+                        and clean_user in clean_txt
+                        and not any(other_tok and other_tok in clean_txt for other_tok in other_account_tokens)
+                    )
+                )
+                if is_user_match:
                     logger.info(f"[SMART-LOCATOR] Cuenta '{target_email}' localizada por coincidencia exacta de correo/usuario ('{item['text']}'): ({item['screen_cx']}, {item['screen_cy']})")
                     return item["screen_cx"], item["screen_cy"], f"ocr_exact_email:{item['text']}"
 

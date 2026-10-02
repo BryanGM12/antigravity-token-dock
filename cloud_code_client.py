@@ -126,14 +126,178 @@ def _load_gemini_profile_alias_map() -> Dict[str, str]:
     return email_to_alias
 
 
+def _decode_jwt_email(id_token: str) -> Optional[str]:
+    """Decodes the middle payload segment of a Google OAuth JWT id_token to extract the verified email."""
+    if not id_token or not isinstance(id_token, str):
+        return None
+    parts = id_token.strip().split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        import base64
+        payload_b64 = parts[1]
+        pad = payload_b64 + ("=" * (-len(payload_b64) % 4))
+        claims = json.loads(base64.urlsafe_b64decode(pad).decode("utf-8", errors="replace"))
+        if isinstance(claims, dict) and claims.get("email"):
+            return str(claims["email"]).strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+def read_antigravity_credential_manager(fallback_email: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Reads the active Antigravity OAuth credential directly from Windows Credential Manager
+    (TargetName = 'gemini:antigravity', CRED_TYPE_GENERIC = 1), where language_server.exe
+    stores the live access_token, refresh_token, expiry, and id_token.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        class _CREDENTIALW(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wt.DWORD),
+                ("Type", wt.DWORD),
+                ("TargetName", wt.LPWSTR),
+                ("Comment", wt.LPWSTR),
+                ("LastWritten", wt.FILETIME),
+                ("CredentialBlobSize", wt.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                ("Persist", wt.DWORD),
+                ("AttributeCount", wt.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wt.LPWSTR),
+                ("UserName", wt.LPWSTR),
+            ]
+
+        advapi32 = ctypes.windll.advapi32
+        pcred = ctypes.POINTER(_CREDENTIALW)()
+        if not advapi32.CredReadW("gemini:antigravity", 1, 0, ctypes.byref(pcred)):
+            return None
+        try:
+            blob_size = pcred.contents.CredentialBlobSize
+            if not blob_size:
+                return None
+            raw_str = ctypes.string_at(pcred.contents.CredentialBlob, blob_size).decode("utf-8", errors="replace")
+        finally:
+            advapi32.CredFree(pcred)
+
+        parsed = json.loads(raw_str)
+        if not isinstance(parsed, dict):
+            return None
+        tok_obj = parsed.get("token") or {}
+        if not isinstance(tok_obj, dict):
+            return None
+
+        access_tok = (tok_obj.get("access_token") or "").strip()
+        refresh_tok = (tok_obj.get("refresh_token") or "").strip()
+        id_tok = (parsed.get("id_token") or "").strip()
+        email = _decode_jwt_email(id_tok) or (fallback_email.strip().lower() if fallback_email else None)
+        if not email or not access_tok:
+            return None
+
+        expiry_ms = 0
+        expiry_str = tok_obj.get("expiry")
+        if isinstance(expiry_str, str) and expiry_str.strip():
+            sec = parse_reset_time_seconds(expiry_str.strip())
+            if sec:
+                expiry_ms = sec * 1000
+        if not expiry_ms:
+            expiry_ms = int(time.time() * 1000) + 1800_000
+
+        return {
+            "email": email,
+            "verified_email": email,
+            "access_token": access_tok,
+            "refresh_token": refresh_tok,
+            "token_type": tok_obj.get("token_type") or "Bearer",
+            "id_token": id_tok,
+            "expiry_date": expiry_ms,
+        }
+    except Exception as e:
+        logger.debug(f"Failed reading gemini:antigravity from Windows Credential Manager: {e}")
+        return None
+
+
+def sync_active_antigravity_oauth_token(fallback_email: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """
+    Synchronizes the active Antigravity account's OAuth credentials from Windows Credential Manager
+    ('gemini:antigravity') into both ~/.gemini/profiles/<alias>/.gemini/oauth_creds.json and account_tokens.json.
+    Returns (email, access_token) if successful.
+    """
+    cred = read_antigravity_credential_manager(fallback_email=fallback_email)
+    if not cred:
+        return None
+    email = cred["email"].strip().lower()
+    access_tok = cred["access_token"]
+    refresh_tok = cred.get("refresh_token") or ""
+
+    try:
+        from config_manager import get_authorized_emails
+        auth_list = get_authorized_emails()
+        if auth_list:
+            auth_set = {a.strip().lower() for a in auth_list if a and "account" not in a.lower()}
+            if auth_set and email not in auth_set:
+                return None
+    except Exception:
+        pass
+
+    email_to_alias = _load_gemini_profile_alias_map()
+    alias = email_to_alias.get(email)
+    if alias:
+        prof_gemini = os.path.join(GEMINI_PROFILES_DIR, alias, ".gemini")
+        creds_path = os.path.join(prof_gemini, "oauth_creds.json")
+        try:
+            os.makedirs(prof_gemini, exist_ok=True)
+            existing = {}
+            if os.path.isfile(creds_path):
+                try:
+                    with open(creds_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f) or {}
+                except Exception:
+                    existing = {}
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged["access_token"] = access_tok
+            if refresh_tok:
+                merged["refresh_token"] = refresh_tok
+            if cred.get("id_token"):
+                merged["id_token"] = cred["id_token"]
+            if cred.get("expiry_date"):
+                merged["expiry_date"] = cred["expiry_date"]
+            merged["token_type"] = cred.get("token_type", "Bearer")
+            merged["verified_email"] = email
+            SafeJsonStore.save_json(creds_path, merged)
+        except Exception as e:
+            logger.debug(f"Could not update profile oauth_creds.json for {email}: {e}")
+
+    save_account_token(email, access_tok)
+    return email, access_tok
+
+
 def refresh_oauth_token_for_email(email: str, force: bool = False) -> Optional[str]:
     """
-    Loads or refreshes the OAuth2 access_token for `email` using ~/.gemini/profiles/<alias>/.gemini/oauth_creds.json.
+    Loads or refreshes the OAuth2 access_token for `email` using Windows Credential Manager
+    ('gemini:antigravity') or ~/.gemini/profiles/<alias>/.gemini/oauth_creds.json.
     Persists refreshed tokens to both the profile's oauth_creds.json and TOKEN_STORE_FILE (account_tokens.json).
     """
     if not email:
         return None
     norm_email = email.strip().lower()
+    now_ms = int(time.time() * 1000)
+
+    # First check if this email is the active account in Windows Credential Manager (gemini:antigravity)
+    if not force:
+        kc_cred = read_antigravity_credential_manager()
+        if kc_cred and kc_cred.get("email") == norm_email:
+            kc_exp = kc_cred.get("expiry_date") or 0
+            kc_tok = kc_cred.get("access_token") or ""
+            if kc_tok and kc_exp > (now_ms + 120_000):
+                sync_active_antigravity_oauth_token()
+                return kc_tok
+
     email_to_alias = _load_gemini_profile_alias_map()
     alias = email_to_alias.get(norm_email)
     creds_paths: List[str] = []
@@ -143,7 +307,6 @@ def refresh_oauth_token_for_email(email: str, force: bool = False) -> Optional[s
     if os.path.isfile(root_creds):
         creds_paths.append(root_creds)
 
-    now_ms = int(time.time() * 1000)
     for cpath in creds_paths:
         if not os.path.isfile(cpath):
             continue
@@ -197,8 +360,14 @@ def refresh_oauth_token_for_email(email: str, force: bool = False) -> Optional[s
 
 
 def load_all_account_tokens(sync_profiles: bool = True) -> Dict[str, str]:
-    """Loads stored OAuth access tokens for background account querying, syncing from Gemini profiles when available."""
+    """Loads stored OAuth access tokens for background account querying, syncing from Credential Manager & Gemini profiles."""
     with _token_store_lock:
+        if sync_profiles:
+            try:
+                sync_active_antigravity_oauth_token()
+            except Exception:
+                pass
+
         data = SafeJsonStore.load_json(TOKEN_STORE_FILE, dict)
         if not isinstance(data, dict):
             data = {}
